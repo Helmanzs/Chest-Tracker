@@ -1,0 +1,622 @@
+"""
+app.py
+------
+Central application class.  Owns all state and wires the UI tabs,
+log monitor, db handler, and Excel price/export handler together.
+
+Data flow
+---------
+  Chest loot  →  db_handler   (Supabase)
+  Item prices →  config.load_prices()  (prices_config.txt)
+  Export      →  excel_handler.export_to_excel()   (on demand)
+
+System tray
+-----------
+Requires:  pip install pystray pillow supabase
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
+import config
+import db_handler
+import excel_handler
+from dataclasses import dataclass, field
+from constants import (
+    CHEST_DATA_SHEETS,
+    DEFAULT_CHEST_TYPE,
+)
+from log_monitor import LogMonitor
+from ui.mini_window import MiniWindow
+from ui.tracker_tab import TrackerTab
+from ui.prices_tab import PricesTab
+from ui.viewer_tab import ViewerTab
+
+
+@dataclass
+class _Session:
+    """Tracks stats for the current listening session."""
+
+    chest_ids: list[int] = field(default_factory=list)
+    total_revenue: float = 0.0
+    chest_count: int = 0
+
+    @property
+    def avg_revenue(self) -> float:
+        return self.total_revenue / self.chest_count if self.chest_count else 0.0
+
+
+try:
+    import pystray as pystray
+    from PIL import Image as _PIL_Image, ImageDraw as _PIL_ImageDraw
+
+    _TRAY_AVAILABLE = True
+except ImportError:
+    pystray = None  # type: ignore[assignment]
+    _PIL_Image = None  # type: ignore[assignment]
+    _PIL_ImageDraw = None  # type: ignore[assignment]
+    _TRAY_AVAILABLE = False
+
+
+def _make_tray_icon_image(size: int = 64) -> "_PIL_Image.Image":  # type: ignore[name-defined]
+    img = _PIL_Image.new("RGBA", (size, size), (0, 0, 0, 0))  # type: ignore[union-attr]
+    draw = _PIL_ImageDraw.Draw(img)  # type: ignore[union-attr]
+    draw.ellipse([4, 4, size - 4, size - 4], fill="#2ecc71", outline="#27ae60", width=3)
+    return img
+
+
+class App:
+    """Root application controller."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self._root = root
+        self._root.title("Multi-Chest Tracker")
+        self._root.geometry("900x750")
+        self._root.protocol("WM_DELETE_WINDOW", self._on_quit)
+
+        # ── Persisted settings ───────────────────────────────────────
+        self._log_path: str = config.load("log_path")
+        self._selected_chest: str = config.load("chest_type") or DEFAULT_CHEST_TYPE
+        self._sheet_name: str = CHEST_DATA_SHEETS.get(self._selected_chest, "")
+
+        # ── Runtime state ────────────────────────────────────────────
+        self._item_prices: dict[str, float] = {}
+        self._db_connected: bool = False
+
+        self._last_most_expensive: tuple[str, float] = ("-", 0.0)
+        self._avg_revenue: float = 0.0
+
+        self._monitor: LogMonitor | None = None
+        self._tray_icon: object = None  # pystray.Icon when active
+        self._session: _Session = _Session()
+
+        # ── UI ───────────────────────────────────────────────────────
+        notebook = ttk.Notebook(root)
+        tab_tracker = ttk.Frame(notebook)
+        tab_viewer = ttk.Frame(notebook)
+        tab_prices = ttk.Frame(notebook)
+        notebook.add(tab_tracker, text=" Live Tracker ")
+        notebook.add(tab_viewer, text=" Excel Data ")
+        notebook.add(tab_prices, text=" Prices ")
+        notebook.pack(expand=1, fill="both")
+
+        self._tracker = TrackerTab(
+            parent=tab_tracker,
+            on_start_stop=self._toggle_service,
+            on_manual=self._manual_chest_trigger,
+            on_mini_toggle=self._toggle_mini,
+            on_log_browse=self._on_log_browse,
+            on_excel_browse=self._on_excel_browse,
+            initial_log_path=self._log_path,
+            initial_excel_path="",
+        )
+
+        self._viewer = ViewerTab(
+            parent=tab_viewer,
+            on_refresh=self._refresh_db_view,
+            on_reload_prices=self._reload_prices,
+            on_export=self._export_to_excel,
+            on_session_toggle=self._on_session_toggle,
+        )
+
+        self._prices_tab = PricesTab(
+            parent=tab_prices,
+            chest_types=list(CHEST_DATA_SHEETS.keys()),
+            on_prices_changed=self._on_prices_changed,
+        )
+
+        self._mini: MiniWindow | None = None
+
+        # Defer startup tasks until after event loop starts
+        self._root.after(0, self._startup)
+
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
+
+    def _startup(self) -> None:
+        """Connect to DB and load prices after UI is fully built."""
+        self._connect_db()
+        self._load_prices()
+        self._refresh_db_view()
+        if self._db_connected:
+            threading.Thread(target=self._startup_drop_rates, daemon=True).start()
+
+    def _startup_drop_rates(self) -> None:
+        """Fetch drop rates for all chest types in background at startup."""
+        all_rates: dict[str, dict[str, float]] = {}
+        for chest_type in CHEST_DATA_SHEETS:
+            all_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
+        self._root.after(0, lambda: self._prices_tab.apply_drop_rates(all_rates))
+
+    def _connect_db(self) -> None:
+        url = config.load("supabase_url")
+        key = config.load("supabase_key")
+        self._db_connected = db_handler.init(url, key)
+        if self._db_connected:
+            self._log("Connected to Supabase ✓", "green")
+        else:
+            self._log(
+                "Supabase not connected — set supabase_url and supabase_key in tracker_config.txt",
+                "red",
+            )
+
+    # ------------------------------------------------------------------
+    # File browsing callbacks
+    # ------------------------------------------------------------------
+
+    def _on_log_browse(self, path: str) -> None:
+        self._log_path = path
+        self._log(f"Log file selected: {path}", "blue")
+        self._save_config()
+
+    def _on_excel_browse(self, path: str) -> None:
+        """No longer used - prices are managed in the Prices window."""
+        pass
+
+    # ------------------------------------------------------------------
+    # Chest type selection
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Service start / stop
+    # ------------------------------------------------------------------
+
+    def _toggle_service(self) -> None:
+        if self._monitor and self._monitor.is_running:
+            self._stop_service()
+        else:
+            self._start_service()
+
+    def _start_service(self) -> None:
+        if not self._log_path or not os.path.exists(self._log_path):
+            messagebox.showwarning("Log File Missing", "Please select a valid log file first!")
+            return
+        if not self._db_connected:
+            messagebox.showwarning(
+                "Not Connected",
+                "Not connected to Supabase.\nCheck supabase_url and supabase_key in tracker_config.txt",
+            )
+            return
+
+        if not self._item_prices:
+            self._load_prices()
+
+        self._monitor = LogMonitor(
+            log_path=self._log_path,
+            chest_types=CHEST_DATA_SHEETS,
+            selected_chest=self._selected_chest,
+            on_chest_detected=self._on_chest_detected,
+            on_loot_item=self._on_loot_item,
+            on_log=self._log_threadsafe,
+            on_timeout=self._on_loot_timeout,
+        )
+        self._monitor.start()
+
+        self._session = _Session()  # reset on each start
+        self._tracker.set_listening(True)
+        self._tracker.set_status("Listening...", "green")
+        self._log("=== SERVICE STARTED ===", "green")
+        self._log(f"Monitoring for: {self._selected_chest}", "blue")
+
+    def _stop_service(self) -> None:
+        if self._monitor:
+            self._monitor.stop()
+        self._tracker.set_listening(False)
+        self._tracker.set_status("Stopped", "red")
+        self._log("=== SERVICE STOPPED ===", "red")
+
+    # ------------------------------------------------------------------
+    # Manual chest trigger
+    # ------------------------------------------------------------------
+
+    def _manual_chest_trigger(self) -> None:
+        if not self._db_connected:
+            messagebox.showwarning("Not Connected", "Not connected to Supabase!")
+            return
+        if not self._selected_chest:
+            messagebox.showwarning("Chest Not Selected", "Please select a chest type first!")
+            return
+
+        if not self._item_prices:
+            self._load_prices()
+
+        if self._monitor is None:
+            self._monitor = LogMonitor(
+                log_path=self._log_path or "",
+                chest_types=CHEST_DATA_SHEETS,
+                selected_chest=self._selected_chest,
+                on_chest_detected=self._on_chest_detected,
+                on_loot_item=self._on_loot_item,
+                on_log=self._log_threadsafe,
+                on_timeout=self._on_loot_timeout,
+            )
+
+        self._on_chest_detected(self._selected_chest)
+        self._log("Manual chest tracking started. Waiting for timeout or next chest...", "purple")
+
+        if not self._monitor.is_running:
+            threading.Thread(target=self._manual_timeout_loop, daemon=True).start()
+
+    def _manual_timeout_loop(self) -> None:
+        import time
+        from constants import LOOT_TIMEOUT
+
+        assert self._monitor is not None
+        while self._monitor._awaiting_loot:  # noqa: SLF001
+            loot = self._monitor.captured_loot
+            last = self._monitor._last_loot_time  # noqa: SLF001
+            ts = self._monitor._target_timestamp  # noqa: SLF001
+            if last and ts and loot:
+                if time.time() - last >= LOOT_TIMEOUT:
+                    self._log(f"Loot collection timeout ({LOOT_TIMEOUT}s). Saving...", "orange")
+                    self._on_loot_timeout()
+                    break
+            time.sleep(0.5)
+
+    # ------------------------------------------------------------------
+    # LogMonitor callbacks
+    # ------------------------------------------------------------------
+
+    def _on_chest_detected(self, chest_name: str) -> None:
+        assert self._monitor is not None
+        pending = self._monitor.finalize()
+        if pending:
+            self._log("Saving previous chest data...", "orange")
+            self._write_loot_to_db(pending)
+
+        # Auto-switch chest type from log — no dropdown needed
+        if chest_name != self._selected_chest:
+            self._selected_chest = chest_name
+            self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, "")
+            self._load_prices()
+            self._tracker.set_sheet_label(self._sheet_name)
+            self._save_config()
+
+        self._monitor.start_new_chest(chest_name)
+        self._log("\n" + "=" * 50, "blue")
+        self._log(f"[!] {chest_name.upper()} DETECTED! Waiting for loot...", "blue")
+        self._log("=" * 50, "blue")
+        self._update_mini()
+
+    def _on_loot_item(self, qty: int, item: str) -> None:
+        colour = self._tracker.get_item_colour(item)
+        self._log_threadsafe(f" + Found: {qty}x {item}", colour)
+        self._update_mini()
+
+    def _on_loot_timeout(self) -> None:
+        assert self._monitor is not None
+        loot = self._monitor.finalize()
+        if not loot:
+            self._log_threadsafe("No loot to save.", "gray")
+            return
+        self._log_threadsafe(f"Finalizing {len(loot)} items...", "blue")
+        threading.Thread(target=self._write_loot_to_db, args=(loot,), daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # DB writing
+    # ------------------------------------------------------------------
+
+    def _write_loot_to_db(self, loot: list[tuple[int, str]]) -> None:
+        result = db_handler.write_chest_loot(
+            chest_type=self._selected_chest,
+            loot=loot,
+            item_prices=self._item_prices,
+        )
+
+        if not result.success:
+            if result.error == "NOT_CONNECTED":
+                msg = "Not connected to Supabase — chest data was NOT saved!"
+            else:
+                msg = f"Error saving to Supabase: {result.error}"
+            self._log_threadsafe(msg, "red")
+            self._root.after(0, lambda m=msg: messagebox.showerror("Save Error", m))
+            return
+
+        for _, item in loot:
+            colour = self._tracker.get_item_colour(item)
+            self._log_threadsafe(f"  → {item}", colour)
+
+        self._log_threadsafe(f"✓ Chest #{result.chest_number} saved to Supabase!", "green")
+
+        if result.chest_revenue > 0:
+            self._log_threadsafe(f"Revenue: {self._fmt(result.chest_revenue)}", "green")
+            if result.most_expensive_item[1] > 0:
+                name, val = result.most_expensive_item
+                self._log_threadsafe(f"Top item: {name} ({self._fmt(val)})", "green")
+
+        self._log_threadsafe("=" * 50 + "\n", "green")
+        # Update session
+        self._session.chest_ids.append(result.chest_id)
+        self._session.total_revenue += result.chest_revenue
+        self._session.chest_count += 1
+
+        self._last_most_expensive = result.most_expensive_item
+        self._root.after(100, self._refresh_db_view)
+        self._root.after(100, self._update_mini)
+
+    # ------------------------------------------------------------------
+    # DB view / statistics
+    # ------------------------------------------------------------------
+
+    def _refresh_db_view(self) -> None:
+        if not self._db_connected:
+            self._log("Not connected to Supabase", "red")
+            return
+        threading.Thread(target=self._refresh_db_view_worker, daemon=True).start()
+
+    def _refresh_db_view_worker(self) -> None:
+        try:
+            session_only = self._viewer.is_session_mode()
+            total_stats = db_handler.calculate_statistics(self._selected_chest, self._item_prices)
+
+            if session_only and self._session.chest_ids:
+                session_stats = db_handler.calculate_statistics_for_ids(self._session.chest_ids, self._item_prices)
+                loot_rows = db_handler.fetch_chests_by_ids(self._session.chest_ids)
+            else:
+                session_stats = total_stats
+                loot_rows = db_handler.fetch_all_loot(self._selected_chest)
+
+            self._avg_revenue = session_stats.avg_revenue_per_chest
+            self._root.after(0, lambda: self._apply_db_view(session_stats, total_stats, loot_rows))
+        except Exception as exc:
+            self._log_threadsafe(f"Refresh error: {exc}", "red")
+
+    def _apply_db_view(
+        self,
+        session_stats: db_handler.Stats,
+        total_stats: db_handler.Stats,
+        loot_rows: list[dict],
+    ) -> None:
+        import pandas as pd
+
+        # Show session stats with total in brackets when they differ
+        self._viewer.show_stats(session_stats, total_stats)
+
+        if not loot_rows:
+            self._viewer.load_dataframe(pd.DataFrame(), self._item_prices)
+            self._log(
+                f"No chests recorded yet for '{self._selected_chest}' — ready to track!",
+                "gray",
+            )
+            return
+
+        df = pd.DataFrame(loot_rows)
+        pivot = df.pivot_table(
+            index=["chest_id", "recorded_at"],
+            columns="item_name",
+            values="quantity",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+        pivot.columns.name = None
+        pivot.insert(0, "#", range(1, len(pivot) + 1))
+
+        self._viewer.load_dataframe(pivot, self._item_prices)
+
+        # Log line: "Loaded 11 (124) chests — avg 1 700 304 (1 258 304), total 154 789 712"
+        s, t = session_stats, total_stats
+        chests_str = (
+            f"{s.total_chests} ({t.total_chests})" if s.total_chests != t.total_chests else str(s.total_chests)
+        )
+        avg_str = (
+            f"{self._fmt(s.avg_revenue_per_chest)} ({self._fmt(t.avg_revenue_per_chest)})"
+            if s.total_chests != t.total_chests
+            else self._fmt(s.avg_revenue_per_chest)
+        )
+        self._log(
+            f"Loaded {chests_str} chests — avg {avg_str}, total {self._fmt(s.total_revenue)}",
+            "gray",
+        )
+
+    def _on_session_toggle(self, session_only: bool) -> None:
+        self._refresh_db_view()
+
+    # ------------------------------------------------------------------
+    # Prices
+    # ------------------------------------------------------------------
+
+    def _load_prices(self) -> None:
+        """Load prices for current chest type from prices_config.txt."""
+        self._item_prices = {k.lower(): v for k, v in config.load_prices(self._selected_chest).items()}
+        self._tracker.set_item_prices(self._item_prices)
+        if self._item_prices:
+            self._log(f"Loaded {len(self._item_prices)} prices for '{self._selected_chest}'", "green")
+        else:
+            self._log(
+                f"No prices set for '{self._selected_chest}' — set them in the Prices tab.",
+                "orange",
+            )
+
+    def _reload_prices(self) -> None:
+        self._load_prices()
+        self._refresh_db_view()
+
+    def _on_prices_changed(self, all_prices: dict[str, dict[str, float]]) -> None:
+        """Called by PricesTab after any save — hot-reload prices for active chest."""
+        chest_prices = all_prices.get(self._selected_chest, {})
+        self._item_prices = {k.lower(): v for k, v in chest_prices.items()}
+        self._tracker.set_item_prices(self._item_prices)
+        self._log(
+            f"Prices updated: {len(self._item_prices)} items for '{self._selected_chest}'",
+            "green",
+        )
+        self._refresh_db_view()
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def _export_to_excel(self) -> None:
+        if not self._db_connected:
+            messagebox.showwarning("Not Connected", "Not connected to Supabase!")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export to Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx")],
+            initialfile=f"{self._selected_chest.replace(chr(39), '').replace(' ', '_')}_export.xlsx",
+        )
+        if not path:
+            return
+
+        self._log("Exporting data...", "blue")
+        threading.Thread(target=self._export_worker, args=(path,), daemon=True).start()
+
+    def _export_worker(self, path: str) -> None:
+        try:
+            loot_rows = db_handler.fetch_all_loot(self._selected_chest)
+            if not loot_rows:
+                self._root.after(
+                    0,
+                    lambda: messagebox.showwarning("No Data", "No chests recorded yet to export."),
+                )
+                return
+            saved_to = excel_handler.export_to_excel(self._selected_chest, loot_rows, path)
+            self._log_threadsafe(f"Exported to {saved_to}", "green")
+            self._root.after(0, lambda: messagebox.showinfo("Export Complete", f"Saved to:\n{saved_to}"))
+        except Exception as exc:
+            msg = f"Export failed: {exc}"
+            self._log_threadsafe(msg, "red")
+            self._root.after(0, lambda m=msg: messagebox.showerror("Export Error", m))
+
+    # ------------------------------------------------------------------
+    # Mini window + system tray
+    # ------------------------------------------------------------------
+
+    def _toggle_mini(self) -> None:
+        if self._mini is not None:
+            self._close_mini_and_restore()
+        else:
+            self._mini = MiniWindow(root=self._root, on_close=self._on_mini_closed)
+            self._tracker.set_mini_active(True)
+            self._update_mini()
+            self._root.withdraw()
+            self._start_tray_icon()
+
+    def _on_mini_closed(self) -> None:
+        self._mini = None
+        self._stop_tray_icon()
+        self._tracker.set_mini_active(False)
+        self._root.deiconify()
+        self._root.lift()
+        self._root.focus_force()
+
+    def _close_mini_and_restore(self) -> None:
+        if self._mini is not None:
+            self._mini._on_close = lambda: None  # type: ignore[attr-defined]
+            self._mini.close()
+            self._mini = None
+        self._stop_tray_icon()
+        self._tracker.set_mini_active(False)
+        self._root.deiconify()
+        self._root.lift()
+        self._root.focus_force()
+
+    def _start_tray_icon(self) -> None:
+        if not _TRAY_AVAILABLE:
+            return
+        if self._tray_icon is not None:
+            return
+        assert pystray is not None
+        menu = pystray.Menu(
+            pystray.MenuItem("Show Tracker", self._tray_show, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", self._tray_quit),
+        )
+        self._tray_icon = pystray.Icon(
+            name="ChestTracker",
+            icon=_make_tray_icon_image(),
+            title="Chest Tracker",
+            menu=menu,
+        )
+        assert self._tray_icon is not None
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()  # type: ignore[union-attr]
+
+    def _stop_tray_icon(self) -> None:
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._tray_icon = None
+
+    def _tray_show(self, icon: object, item: object) -> None:
+        self._root.after(0, self._close_mini_and_restore)
+
+    def _tray_quit(self, icon: object, item: object) -> None:
+        self._root.after(0, self._on_quit)
+
+    def _update_mini(self) -> None:
+        if self._mini is None:
+            return
+        is_running = self._monitor is not None and self._monitor.is_running
+        self._root.after(
+            0,
+            lambda: (
+                self._mini.update(  # type: ignore[union-attr]
+                    is_running=is_running,
+                    most_expensive=self._last_most_expensive,
+                    avg_revenue=self._avg_revenue,
+                )
+                if self._mini
+                else None
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Quit
+    # ------------------------------------------------------------------
+
+    def _on_quit(self) -> None:
+        if self._monitor:
+            self._monitor.stop()
+        self._stop_tray_icon()
+        self._root.destroy()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _save_config(self) -> None:
+        config.save(
+            {
+                "log_path": self._log_path,
+                "chest_type": self._selected_chest,
+            }
+        )
+
+    def _log(self, message: str, colour: str = "black") -> None:
+        self._tracker.log(message, colour)
+
+    def _log_threadsafe(self, message: str, colour: str = "black") -> None:
+        self._root.after(0, lambda: self._tracker.log(message, colour))
+
+    @staticmethod
+    def _fmt(value: float) -> str:
+        return f"{value:,.0f}".replace(",", " ")
