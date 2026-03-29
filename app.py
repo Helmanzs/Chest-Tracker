@@ -84,11 +84,14 @@ class App:
         self._sheet_name: str = CHEST_DATA_SHEETS.get(self._selected_chest, "")
 
         # ── Runtime state ────────────────────────────────────────────
-        self._item_prices: dict[str, float] = {}
+        self._item_prices: dict[str, float] = {}  # prices for current chest
+        self._all_prices: dict[str, dict[str, float]] = {}  # prices for all chests
+        self._shard_avgs: dict[str, float] = {}  # {chest_type: avg shard qty}
         self._db_connected: bool = False
 
         self._last_most_expensive: tuple[str, float] = ("-", 0.0)
-        self._avg_revenue: float = 0.0
+        self._avg_revenue: float = 0.0  # used by viewer tab
+        self._mini_avg_revenue: float = 0.0  # always tracks active chest, shown in mini
 
         self._monitor: LogMonitor | None = None
         self._tray_icon: object = None  # pystray.Icon when active
@@ -110,17 +113,17 @@ class App:
             on_manual=self._manual_chest_trigger,
             on_mini_toggle=self._toggle_mini,
             on_log_browse=self._on_log_browse,
-            on_excel_browse=self._on_excel_browse,
             initial_log_path=self._log_path,
-            initial_excel_path="",
         )
 
         self._viewer = ViewerTab(
             parent=tab_viewer,
+            chest_types=list(CHEST_DATA_SHEETS.keys()),
             on_refresh=self._refresh_db_view,
             on_reload_prices=self._reload_prices,
             on_export=self._export_to_excel,
             on_session_toggle=self._on_session_toggle,
+            on_chest_selected=self._on_viewer_chest_selected,
         )
 
         self._prices_tab = PricesTab(
@@ -141,17 +144,54 @@ class App:
     def _startup(self) -> None:
         """Connect to DB and load prices after UI is fully built."""
         self._connect_db()
-        self._load_prices()
+        self._load_all_prices_startup()
         self._refresh_db_view()
+        # Pass chest types to tracker for the manual chest dialog
+        self._tracker.set_chest_types(list(CHEST_DATA_SHEETS.keys()))
         if self._db_connected:
             threading.Thread(target=self._startup_drop_rates, daemon=True).start()
 
+    def _load_all_prices_startup(self) -> None:
+        """Load prices for every chest type and log a summary for each."""
+        from config import load_all_prices as _load_all
+
+        self._all_prices = _load_all()
+        for chest_type in CHEST_DATA_SHEETS:
+            prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
+            count = len(prices)
+            if count:
+                self._log(f"Loaded {count} prices for '{chest_type}'", "green")
+            else:
+                self._log(f"No prices set for '{chest_type}' — set them in the Prices tab.", "orange")
+        # Keep item_prices for the viewer-selected chest (defaults to first)
+        viewer_chest = self._viewer.selected_chest() or self._selected_chest
+        self._item_prices = {k.lower(): v for k, v in self._all_prices.get(viewer_chest, {}).items()}
+        self._tracker.set_item_prices(self._item_prices)
+
     def _startup_drop_rates(self) -> None:
-        """Fetch drop rates for all chest types in background at startup."""
+        """Fetch drop rates + per-chest stats for all chest types at startup."""
         all_rates: dict[str, dict[str, float]] = {}
+        all_stats: dict[str, db_handler.Stats] = {}
         for chest_type in CHEST_DATA_SHEETS:
             all_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
-        self._root.after(0, lambda: self._prices_tab.apply_drop_rates(all_rates))
+            prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
+            all_stats[chest_type] = db_handler.calculate_statistics(chest_type, prices)
+            shard_avg = db_handler.fetch_item_avg(chest_type, "Shard")
+            if shard_avg is not None:
+                self._shard_avgs[chest_type] = shard_avg
+
+        # Log per-chest summary
+        def _log_stats() -> None:
+            for ct, st in all_stats.items():
+                short = ct.replace("'s Chest", "").replace(" Chest", "").strip()
+                if st.total_chests > 0:
+                    self._log(
+                        f"{short}: {st.total_chests} chests — avg {self._fmt(st.avg_revenue_per_chest)}",
+                        "gray",
+                    )
+            self._prices_tab.apply_drop_rates(all_rates, all_stats)
+
+        self._root.after(0, _log_stats)
 
     def _connect_db(self) -> None:
         url = config.load("supabase_url")
@@ -173,10 +213,6 @@ class App:
         self._log_path = path
         self._log(f"Log file selected: {path}", "blue")
         self._save_config()
-
-    def _on_excel_browse(self, path: str) -> None:
-        """No longer used - prices are managed in the Prices window."""
-        pass
 
     # ------------------------------------------------------------------
     # Chest type selection
@@ -220,8 +256,7 @@ class App:
         self._session = _Session()  # reset on each start
         self._tracker.set_listening(True)
         self._tracker.set_status("Listening...", "green")
-        self._log("=== SERVICE STARTED ===", "green")
-        self._log(f"Monitoring for: {self._selected_chest}", "blue")
+        self._log("=== SERVICE STARTED === Listening for all chest types...", "green")
 
     def _stop_service(self) -> None:
         if self._monitor:
@@ -234,29 +269,29 @@ class App:
     # Manual chest trigger
     # ------------------------------------------------------------------
 
-    def _manual_chest_trigger(self) -> None:
+    def _manual_chest_trigger(self, chest_type: str) -> None:
         if not self._db_connected:
             messagebox.showwarning("Not Connected", "Not connected to Supabase!")
             return
-        if not self._selected_chest:
-            messagebox.showwarning("Chest Not Selected", "Please select a chest type first!")
-            return
 
-        if not self._item_prices:
+        if not self._item_prices or self._selected_chest != chest_type:
+            self._selected_chest = chest_type
+            self._sheet_name = CHEST_DATA_SHEETS.get(chest_type, "")
             self._load_prices()
+            self._tracker.set_sheet_label(self._sheet_name)
 
         if self._monitor is None:
             self._monitor = LogMonitor(
                 log_path=self._log_path or "",
                 chest_types=CHEST_DATA_SHEETS,
-                selected_chest=self._selected_chest,
+                selected_chest=chest_type,
                 on_chest_detected=self._on_chest_detected,
                 on_loot_item=self._on_loot_item,
                 on_log=self._log_threadsafe,
                 on_timeout=self._on_loot_timeout,
             )
 
-        self._on_chest_detected(self._selected_chest)
+        self._on_chest_detected(chest_type)
         self._log("Manual chest tracking started. Waiting for timeout or next chest...", "purple")
 
         if not self._monitor.is_running:
@@ -289,12 +324,17 @@ class App:
             self._log("Saving previous chest data...", "orange")
             self._write_loot_to_db(pending)
 
-        # Auto-switch chest type from log — no dropdown needed
+        # Auto-switch chest type from log and sync viewer dropdown
         if chest_name != self._selected_chest:
             self._selected_chest = chest_name
             self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, "")
-            self._load_prices()
+            self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_name, {}).items()}
+            self._tracker.set_item_prices(self._item_prices)
             self._tracker.set_sheet_label(self._sheet_name)
+            self._root.after(0, lambda ct=chest_name: self._viewer.set_selected_chest(ct))
+            # Reset mini avg when switching chest types
+            self._mini_avg_revenue = 0.0
+            self._session = _Session()
             self._save_config()
 
         self._monitor.start_new_chest(chest_name)
@@ -321,7 +361,61 @@ class App:
     # DB writing
     # ------------------------------------------------------------------
 
+    # Items that can drop directly from a boss (not from the chest itself).
+    # If a loot batch contains ONLY these items and no Shard, it is a direct
+    # boss drop — skip silently without logging an error.
+    _DIRECT_DROP_ITEMS: frozenset[str] = frozenset(
+        {
+            "dexterity of the smith (chest)",
+            "emblem chest",
+        }
+    )
+
+    def _validate_loot(self, loot: list[tuple[int, str]]) -> str | None:
+        """
+        Return an error message if loot looks like a falsified/error report,
+        None if it passes, or the sentinel _SKIP_SILENT if it should be
+        silently ignored (direct boss drop, not a chest opening).
+
+        Rules
+        -----
+        - If no Shard present AND all items are known direct-drop-only items
+          → silent skip (boss drop, not a chest)
+        - If no Shard present for any other reason → error
+        - Shard quantity must be <= avg_shard_qty * 2  (if avg is known)
+        """
+        item_names_lower = {item.strip().lower() for _, item in loot}
+        shard_qty = next(
+            (qty for qty, item in loot if item.strip().lower() == "shard"),
+            None,
+        )
+
+        if shard_qty is None or shard_qty == 0:
+            # Check if this looks like a direct boss drop
+            if item_names_lower.issubset(self._DIRECT_DROP_ITEMS):
+                return self._SKIP_SILENT
+            return "Shard quantity is 0 — chest data looks incomplete. Not saved."
+
+        avg = self._shard_avgs.get(self._selected_chest)
+        if avg is not None and avg > 0 and shard_qty > avg * 2:
+            return (
+                f"Shard quantity {shard_qty} is more than 2× the average "
+                f"({avg:.0f}). Looks like an error — not saved."
+            )
+        return None
+
+    _SKIP_SILENT = "__skip_silent__"
+
     def _write_loot_to_db(self, loot: list[tuple[int, str]]) -> None:
+        # Validate before writing
+        error = self._validate_loot(loot)
+        if error == self._SKIP_SILENT:
+            self._log_threadsafe("Skipped direct boss drop (no Shard — not a chest opening).", "gray")
+            return
+        if error:
+            self._log_threadsafe(f"⚠ Validation failed: {error}", "red")
+            return
+
         result = db_handler.write_chest_loot(
             chest_type=self._selected_chest,
             loot=loot,
@@ -350,14 +444,17 @@ class App:
                 self._log_threadsafe(f"Top item: {name} ({self._fmt(val)})", "green")
 
         self._log_threadsafe("=" * 50 + "\n", "green")
-        # Update session
+        # Update session immediately so mini window shows live data
         self._session.chest_ids.append(result.chest_id)
         self._session.total_revenue += result.chest_revenue
         self._session.chest_count += 1
+        # Update mini avg from session — always reflects active chest
+        self._mini_avg_revenue = self._session.avg_revenue
+        self._avg_revenue = self._session.avg_revenue
 
         self._last_most_expensive = result.most_expensive_item
-        self._root.after(100, self._refresh_db_view)
-        self._root.after(100, self._update_mini)
+        self._root.after(0, self._update_mini)
+        self._root.after(200, self._refresh_db_view)
 
     # ------------------------------------------------------------------
     # DB view / statistics
@@ -371,18 +468,29 @@ class App:
 
     def _refresh_db_view_worker(self) -> None:
         try:
+            # Snapshot mutable state before any async work
+            chest_type = self._viewer.selected_chest() or self._selected_chest
+            item_prices = dict(self._all_prices.get(chest_type, self._item_prices))
+            item_prices_lower = {k.lower(): v for k, v in item_prices.items()}
             session_only = self._viewer.is_session_mode()
-            total_stats = db_handler.calculate_statistics(self._selected_chest, self._item_prices)
+            session_ids = list(self._session.chest_ids)
 
-            if session_only and self._session.chest_ids:
-                session_stats = db_handler.calculate_statistics_for_ids(self._session.chest_ids, self._item_prices)
-                loot_rows = db_handler.fetch_chests_by_ids(self._session.chest_ids)
+            total_stats = db_handler.calculate_statistics(chest_type, item_prices_lower)
+
+            if session_only and session_ids:
+                session_stats = db_handler.calculate_statistics_for_ids(session_ids, item_prices_lower)
+                loot_rows = db_handler.fetch_chests_by_ids(session_ids)
             else:
                 session_stats = total_stats
-                loot_rows = db_handler.fetch_all_loot(self._selected_chest)
+                loot_rows = db_handler.fetch_all_loot(chest_type)
 
             self._avg_revenue = session_stats.avg_revenue_per_chest
-            self._root.after(0, lambda: self._apply_db_view(session_stats, total_stats, loot_rows))
+            self._root.after(
+                0,
+                lambda s=session_stats, t=total_stats, l=loot_rows, ip=item_prices_lower: self._apply_db_view(
+                    s, t, l, ip
+                ),
+            )
         except Exception as exc:
             self._log_threadsafe(f"Refresh error: {exc}", "red")
 
@@ -391,6 +499,7 @@ class App:
         session_stats: db_handler.Stats,
         total_stats: db_handler.Stats,
         loot_rows: list[dict],
+        item_prices: dict[str, float] | None = None,
     ) -> None:
         import pandas as pd
 
@@ -398,7 +507,7 @@ class App:
         self._viewer.show_stats(session_stats, total_stats)
 
         if not loot_rows:
-            self._viewer.load_dataframe(pd.DataFrame(), self._item_prices)
+            self._viewer.load_dataframe(pd.DataFrame(), item_prices or self._item_prices)
             self._log(
                 f"No chests recorded yet for '{self._selected_chest}' — ready to track!",
                 "gray",
@@ -416,7 +525,7 @@ class App:
         pivot.columns.name = None
         pivot.insert(0, "#", range(1, len(pivot) + 1))
 
-        self._viewer.load_dataframe(pivot, self._item_prices)
+        self._viewer.load_dataframe(pivot, item_prices or self._item_prices)
 
         # Log line: "Loaded 11 (124) chests — avg 1 700 304 (1 258 304), total 154 789 712"
         s, t = session_stats, total_stats
@@ -436,13 +545,20 @@ class App:
     def _on_session_toggle(self, session_only: bool) -> None:
         self._refresh_db_view()
 
+    def _on_viewer_chest_selected(self, chest_type: str) -> None:
+        """Called when the user picks a chest in the Excel Data tab."""
+        self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
+        self._refresh_db_view()
+
     # ------------------------------------------------------------------
     # Prices
     # ------------------------------------------------------------------
 
     def _load_prices(self) -> None:
         """Load prices for current chest type from prices_config.txt."""
-        self._item_prices = {k.lower(): v for k, v in config.load_prices(self._selected_chest).items()}
+        chest_prices = config.load_prices(self._selected_chest)
+        self._all_prices[self._selected_chest] = chest_prices
+        self._item_prices = {k.lower(): v for k, v in chest_prices.items()}
         self._tracker.set_item_prices(self._item_prices)
         if self._item_prices:
             self._log(f"Loaded {len(self._item_prices)} prices for '{self._selected_chest}'", "green")
@@ -457,7 +573,8 @@ class App:
         self._refresh_db_view()
 
     def _on_prices_changed(self, all_prices: dict[str, dict[str, float]]) -> None:
-        """Called by PricesTab after any save — hot-reload prices for active chest."""
+        """Called by PricesTab after any save — hot-reload prices for all chests."""
+        self._all_prices = all_prices
         chest_prices = all_prices.get(self._selected_chest, {})
         self._item_prices = {k.lower(): v for k, v in chest_prices.items()}
         self._tracker.set_item_prices(self._item_prices)
@@ -466,6 +583,8 @@ class App:
             "green",
         )
         self._refresh_db_view()
+        if self._db_connected:
+            threading.Thread(target=self._startup_drop_rates, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Export
@@ -576,13 +695,14 @@ class App:
         if self._mini is None:
             return
         is_running = self._monitor is not None and self._monitor.is_running
+        mini_avg = self._mini_avg_revenue
         self._root.after(
             0,
             lambda: (
                 self._mini.update(  # type: ignore[union-attr]
                     is_running=is_running,
                     most_expensive=self._last_most_expensive,
-                    avg_revenue=self._avg_revenue,
+                    avg_revenue=mini_avg,
                 )
                 if self._mini
                 else None

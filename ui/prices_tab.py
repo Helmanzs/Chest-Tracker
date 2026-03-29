@@ -40,6 +40,21 @@ _FG_NORMAL = "#1a1a1a"
 _FG_CHANCE = "#7f8c8d"
 
 
+def _fmt_k(value: float) -> str:
+    """Format large numbers compactly: 1 700 304 or 14.2kk."""
+    if value >= 1_000_000:
+        v = value / 1_000_000
+        return f"{v:.1f}kk".rstrip("0").rstrip(".") + "kk" if False else f"{int(value):,}".replace(",", " ")
+    return f"{int(value):,}".replace(",", " ")
+
+
+def _safe_parse(raw: str) -> float:
+    try:
+        return parse_price(raw)
+    except ValueError:
+        return 0.0
+
+
 def parse_price(raw: str) -> float:
     s = raw.strip().replace(" ", "").replace(",", "").lower()
     if not s:
@@ -77,8 +92,11 @@ class PricesTab:
         self._vars: dict[str, dict[str, tk.StringVar]] = {}
         self._shared_items: set[str] = set()
         self._widgets: dict[str, dict[str, tuple[tk.Label, tk.Label, tk.Entry]]] = {}
+        # {item_name_lower: [entry, ...]} for cross-card highlight
+        self._all_entries: dict[str, list[tk.Entry]] = {}
         # {chest_type: {item_name: drop_pct}}
         self._drop_rates: dict[str, dict[str, float]] = {}
+        self._chest_stats: dict[str, db_handler.Stats] = {}
         self._scroll_refresh_id: str | None = None
 
         self._build()
@@ -114,18 +132,6 @@ class PricesTab:
             padx=12,
             pady=4,
             command=lambda: self._add_item_dialog(),
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
-        tk.Button(
-            toolbar,
-            text="🔄  Reload",
-            font=("Arial", 10),
-            bg="#95a5a6",
-            fg="white",
-            relief=tk.FLAT,
-            padx=12,
-            pady=4,
-            command=self._reload,
         ).pack(side=tk.LEFT, padx=(0, 6))
 
         tk.Button(
@@ -188,6 +194,8 @@ class PricesTab:
         for w in self._cards_frame.winfo_children():
             w.destroy()
         self._widgets.clear()
+        self._avg_labels: dict[str, tk.Label] = {}
+        self._all_entries.clear()
 
         for col, chest_type in enumerate(self._chest_types):
             self._build_card(chest_type, col, filter_text)
@@ -254,9 +262,21 @@ class PricesTab:
             font=("Arial", 12, "bold"),
             fg=hdr_fg,
             bg=hdr_bg,
-            pady=8,
             width=_CARD_W // 10,
-        ).pack(fill=tk.X)
+        ).pack(fill=tk.X, pady=(8, 2))
+
+        # Avg revenue label — updated by apply_drop_rates
+        avg_label = tk.Label(
+            card,
+            text="avg: —",
+            font=("Arial", 8),
+            fg=hdr_fg,
+            bg=hdr_bg,
+        )
+        avg_label.pack(fill=tk.X, pady=(0, 6))
+        if not hasattr(self, "_avg_labels"):
+            self._avg_labels: dict[str, tk.Label] = {}
+        self._avg_labels[chest_type] = avg_label
 
         # Column headings
         col_head = tk.Frame(card, bg="#f2f2f2")
@@ -411,6 +431,22 @@ class PricesTab:
         ent.bind("<FocusOut>", lambda e, n=item_name, ct=chest_type, v=str_var: self._commit(n, ct, v))
         ent.bind("<Return>", lambda e, n=item_name, ct=chest_type, v=str_var: self._commit(n, ct, v))
 
+        # Cross-card highlight for shared items
+        nl = item_name.lower()
+        if nl not in self._all_entries:
+            self._all_entries[nl] = []
+        self._all_entries[nl].append(ent)
+        if nl in self._shared_items:
+            ent.bind("<FocusIn>", lambda e, n=nl: self._highlight_shared(n, True))
+            ent.bind(
+                "<FocusOut>",
+                lambda e, n=nl, ct=chest_type, v=str_var, nm=item_name: (
+                    self._highlight_shared(n, False),
+                    self._commit(nm, ct, v),
+                ),
+                add="+",
+            )
+
         for w in (row, lbl, chance_lbl):
             w.bind("<MouseWheel>", wheel_cb)  # type: ignore[arg-type]
 
@@ -474,15 +510,27 @@ class PricesTab:
 
     def _fetch_drop_rates_worker(self) -> None:
         all_rates: dict[str, dict[str, float]] = {}
+        all_stats: dict[str, db_handler.Stats] = {}
         for chest_type in self._chest_types:
             all_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
-        self._parent.after(0, lambda: self.apply_drop_rates(all_rates))
+            # Also refresh stats so chest count and avg update
+            prices = {k.lower(): v for k, v in config.load_prices(chest_type).items()}
+            all_stats[chest_type] = db_handler.calculate_statistics(chest_type, prices)
+        self._parent.after(0, lambda: self.apply_drop_rates(all_rates, all_stats))
 
-    def apply_drop_rates(self, all_rates: dict[str, dict[str, float]]) -> None:
+    def apply_drop_rates(
+        self,
+        all_rates: dict[str, dict[str, float]],
+        all_stats: dict[str, db_handler.Stats] | None = None,
+    ) -> None:
         """
-        Public — called by app.py on startup and by the Refresh button.
-        Updates chance labels in-place without any redraw.
+        Public — called by app.py on startup and Refresh button.
+        Updates chance labels and avg revenue header in-place, no redraw.
         """
+        if all_stats is not None:
+            self._chest_stats = all_stats
+
+        # Update chance labels for all chests with rate data
         for chest_type, rates in all_rates.items():
             self._drop_rates[chest_type] = rates
             for item_name, widgets in self._widgets.get(chest_type, {}).items():
@@ -498,8 +546,37 @@ class PricesTab:
                     chance_lbl.config(text=text)
                 except tk.TclError:
                     pass
+
+        # Update avg labels for ALL chest types — even those with no rate data
+        # so stats-only updates (e.g. after a new chest write) work correctly
+        for chest_type in self._chest_types:
+            rates = self._drop_rates.get(chest_type, {})
+            self._update_avg_label(chest_type, rates)
+
         self._sync_label.config(text="✓ Drop rates updated")
         self._parent.after(3000, lambda: self._sync_label.config(text=""))
+
+    def _update_avg_label(self, chest_type: str, rates: dict[str, float]) -> None:
+        """Update the avg revenue subtitle in the card header."""
+        avg_lbl = getattr(self, "_avg_labels", {}).get(chest_type)
+        if avg_lbl is None:
+            return
+        stats = self._chest_stats.get(chest_type)
+        if stats is not None and stats.avg_revenue_per_chest > 0:
+            avg = stats.avg_revenue_per_chest
+            total = stats.total_chests
+            text = f"avg {_fmt_k(avg)}  ·  {total} chests"
+        else:
+            # Estimate from drop_rate × price when no real data yet
+            expected = sum(
+                (rates.get(name, 0.0) / 100.0) * _safe_parse(sv.get())
+                for name, sv in self._vars.get(chest_type, {}).items()
+            )
+            text = f"est. avg {_fmt_k(expected)}" if expected > 0 else "avg: —"
+        try:
+            avg_lbl.config(text=text)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Save
@@ -597,6 +674,19 @@ class PricesTab:
     # ------------------------------------------------------------------
     # Reload / search
     # ------------------------------------------------------------------
+
+    def _highlight_shared(self, item_name_lower: str, active: bool) -> None:
+        """Highlight all entries for a shared item across all cards."""
+        colour = "#fff3cd" if active else None  # warm yellow when focused
+        for ent in self._all_entries.get(item_name_lower, []):
+            try:
+                if colour:
+                    ent.config(bg=colour)
+                else:
+                    # Restore original bg (alternating row colour is lost, use white)
+                    ent.config(bg="white")
+            except tk.TclError:
+                pass
 
     def _reload(self) -> None:
         self._vars.clear()

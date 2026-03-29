@@ -31,57 +31,54 @@ class TrackerTab:
     ----------
     parent          : the ttk.Frame that is the tab container
     on_start_stop   : called when the START/STOP button is pressed
-    on_manual       : called when MANUAL CHEST is pressed
+    on_manual       : called with chest_type str when manual chest is confirmed
     on_mini_toggle  : called when MINI MODE is pressed
     on_log_browse   : called with the new path when the user picks a log file
-    on_excel_browse : called with the new path when the user picks an Excel file
     """
 
     def __init__(
         self,
         parent: ttk.Frame,
         on_start_stop: Callable[[], None],
-        on_manual: Callable[[], None],
+        on_manual: Callable[[str], None],
         on_mini_toggle: Callable[[], None],
         on_log_browse: Callable[[str], None],
-        on_excel_browse: Callable[[str], None],
         initial_log_path: str = "",
-        initial_excel_path: str = "",
     ) -> None:
         self._parent = parent
         self._on_start_stop = on_start_stop
-        self._on_manual = on_manual
+        self._on_manual: Callable[[str], None] = on_manual
         self._on_mini_toggle = on_mini_toggle
         self._on_log_browse = on_log_browse
-        self._on_excel_browse = on_excel_browse
 
         # Prices cached here so get_item_color can work without app coupling
         self._item_prices: dict[str, float] = {}
+        self._chest_types: list[str] = []
 
-        self._build(initial_log_path, initial_excel_path)
+        self._build(initial_log_path)
 
     # ------------------------------------------------------------------
     # Build
     # ------------------------------------------------------------------
 
-    def _build(self, log_path: str, excel_path: str) -> None:
+    def _build(self, log_path: str) -> None:
         # ── File configuration ───────────────────────────────────────
         cfg = tk.LabelFrame(self._parent, text=" File Configuration ", padx=10, pady=10)
         cfg.pack(padx=10, pady=10, fill=tk.X)
 
-        tk.Label(cfg, text="Log:").grid(row=0, column=0, sticky="w")
+        tk.Label(cfg, text="Log file:").grid(row=0, column=0, sticky="w")
         self._log_label = tk.Label(cfg, text=self._short(log_path), fg="blue")
         self._log_label.grid(row=0, column=1, sticky="w", padx=5)
         tk.Button(cfg, text="Browse", command=self._browse_log).grid(row=0, column=2, pady=2)
 
-        tk.Label(cfg, text="Excel:").grid(row=1, column=0, sticky="w")
-        self._excel_label = tk.Label(cfg, text=self._short(excel_path), fg="green")
-        self._excel_label.grid(row=1, column=1, sticky="w", padx=5)
-        tk.Button(cfg, text="Browse", command=self._browse_excel).grid(row=1, column=2, pady=2)
+        tk.Label(cfg, text="Active chest:").grid(row=1, column=0, sticky="w")
+        self._sheet_label = tk.Label(cfg, text="Auto-detect from log", fg="purple")
+        self._sheet_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
-        tk.Label(cfg, text="Sheet:").grid(row=2, column=0, sticky="w")
-        self._sheet_label = tk.Label(cfg, text="Auto-detect", fg="purple")
-        self._sheet_label.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        # Manual chest selector — stays persistent, no popup dialog
+        tk.Label(cfg, text="Manual chest:").grid(row=2, column=0, sticky="w")
+        self._manual_combo = ttk.Combobox(cfg, state="readonly", width=28)
+        self._manual_combo.grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         # ── Status ──────────────────────────────────────────────────
         self._status_label = tk.Label(self._parent, text="Status: Ready", font=("Arial", 12, "bold"), fg="gray")
@@ -106,7 +103,7 @@ class TrackerTab:
             btn_row,
             text="MANUAL CHEST",
             font=("Arial", 10, "bold"),
-            command=self._on_manual,
+            command=self._manual_btn_pressed,
             bg="#3498db",
             fg="white",
             height=2,
@@ -163,8 +160,12 @@ class TrackerTab:
     def set_log_path_label(self, path: str) -> None:
         self._log_label.config(text=self._short(path))
 
-    def set_excel_path_label(self, path: str) -> None:
-        self._excel_label.config(text=self._short(path))
+    def set_chest_types(self, chest_types: list[str]) -> None:
+        """Update the chest type list and populate the manual combo."""
+        self._chest_types = chest_types
+        self._manual_combo["values"] = chest_types
+        if chest_types and not self._manual_combo.get():
+            self._manual_combo.set(chest_types[0])
 
     def set_item_prices(self, prices: dict[str, float]) -> None:
         """Update the price lookup used for log-line colouring."""
@@ -206,6 +207,16 @@ class TrackerTab:
     def _short(path: str) -> str:
         return os.path.basename(path) if path else "Not selected"
 
+    def _manual_btn_pressed(self) -> None:
+        """Fire on_manual with the currently selected chest from the inline combo."""
+        selected = self._manual_combo.get()
+        if not selected:
+            from tkinter import messagebox
+
+            messagebox.showwarning("No Chest Selected", "Select a chest type in the Manual chest dropdown first.")
+            return
+        self._on_manual(selected)
+
     def _browse_log(self) -> None:
         path = filedialog.askopenfilename(
             title="Select Log File",
@@ -214,12 +225,3 @@ class TrackerTab:
         if path:
             self._log_label.config(text=self._short(path))
             self._on_log_browse(path)
-
-    def _browse_excel(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select Excel File",
-            filetypes=[("Excel Files", "*.xlsx *.xlsm"), ("All Files", "*.*")],
-        )
-        if path:
-            self._excel_label.config(text=self._short(path))
-            self._on_excel_browse(path)

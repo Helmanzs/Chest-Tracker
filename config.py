@@ -7,8 +7,9 @@ to their Excel data sheet and price sheet.
 
 Format of tracker_config.txt
 -----------------------------
-log_path=C:/...
-excel_path=C:/...
+log_path=C:/path/to/game.log
+supabase_url=https://xxxx.supabase.co
+supabase_key=your_key_here
 ...
 
 [chest_sheets]

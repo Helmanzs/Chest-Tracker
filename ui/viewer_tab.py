@@ -5,25 +5,23 @@ The "Excel Data" tab.
 
 Features
 --------
+- Chest type selector (dropdown) — shows data for one chest at a time
 - Checkbox to toggle between current session and all-time data
 - Export to Excel button (file picker dialog)
-- Treeview columns sorted by item price (most expensive first),
-  with pinned items (Shard, Energy Fragment) always first
 - Statistics panel shows session stats with total-average in brackets
+- Treeview columns sorted by item price, pinned items first
 """
 
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 from typing import Callable
 
 import pandas as pd
 
 import db_handler
 
-
-# Items always shown first in the table regardless of price
 PINNED_COLUMNS = ["#", "chest_id", "recorded_at", "Shard", "Energy Fragment"]
 
 
@@ -31,27 +29,34 @@ class ViewerTab:
     """
     Parameters
     ----------
-    parent            : the ttk.Frame that is the tab container
+    parent            : ttk.Frame tab container
+    chest_types       : ordered list of chest display names
     on_refresh        : called when Refresh is pressed
     on_reload_prices  : called when Reload Prices is pressed
     on_export         : called when Export to Excel is pressed
     on_session_toggle : called with bool (True = session only)
+    on_chest_selected : called with chest_type str when selector changes
     """
 
     def __init__(
         self,
         parent: ttk.Frame,
+        chest_types: list[str],
         on_refresh: Callable[[], None],
         on_reload_prices: Callable[[], None],
         on_export: Callable[[], None],
         on_session_toggle: Callable[[bool], None],
+        on_chest_selected: Callable[[str], None],
     ) -> None:
         self._parent = parent
+        self._chest_types = chest_types
         self._on_refresh = on_refresh
         self._on_reload_prices = on_reload_prices
         self._on_export = on_export
         self._on_session_toggle = on_session_toggle
+        self._on_chest_selected = on_chest_selected
         self._session_var = tk.BooleanVar(value=False)
+        self._chest_var = tk.StringVar(value=chest_types[0] if chest_types else "")
         self._build()
 
     # ------------------------------------------------------------------
@@ -59,9 +64,32 @@ class ViewerTab:
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        # ── Buttons ──────────────────────────────────────────────────
+        # ── Top row: chest selector + session checkbox ────────────────
+        top_row = tk.Frame(self._parent)
+        top_row.pack(fill=tk.X, padx=10, pady=(8, 2))
+
+        tk.Label(top_row, text="Chest:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        self._chest_combo = ttk.Combobox(
+            top_row,
+            textvariable=self._chest_var,
+            values=self._chest_types,
+            state="readonly",
+            width=28,
+        )
+        self._chest_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self._chest_combo.bind("<<ComboboxSelected>>", self._on_combo)
+
+        tk.Checkbutton(
+            top_row,
+            text="Show current session only",
+            variable=self._session_var,
+            command=self._on_checkbox,
+            font=("Arial", 9),
+        ).pack(side=tk.LEFT, padx=(0, 0))
+
+        # ── Button row ───────────────────────────────────────────────
         btn_row = tk.Frame(self._parent)
-        btn_row.pack(fill=tk.X, padx=10, pady=5)
+        btn_row.pack(fill=tk.X, padx=10, pady=(2, 5))
 
         tk.Button(btn_row, text="Refresh Data", command=self._on_refresh).pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(btn_row, text="Reload Prices", command=self._on_reload_prices).pack(side=tk.LEFT, padx=(0, 5))
@@ -74,15 +102,6 @@ class ViewerTab:
             relief=tk.FLAT,
             padx=8,
         ).pack(side=tk.LEFT, padx=(0, 5))
-
-        # Session checkbox
-        tk.Checkbutton(
-            btn_row,
-            text="Show current session only",
-            variable=self._session_var,
-            command=self._on_checkbox,
-            font=("Arial", 9),
-        ).pack(side=tk.LEFT, padx=(10, 0))
 
         # ── Statistics panel ─────────────────────────────────────────
         stats = tk.LabelFrame(self._parent, text=" Statistics ", padx=10, pady=8)
@@ -121,12 +140,21 @@ class ViewerTab:
     # Public interface
     # ------------------------------------------------------------------
 
+    def selected_chest(self) -> str:
+        return self._chest_var.get()
+
+    def set_selected_chest(self, chest_type: str) -> None:
+        """Update the dropdown to reflect auto-detected chest."""
+        if chest_type in self._chest_types:
+            self._chest_var.set(chest_type)
+
+    def set_chest_types(self, chest_types: list[str]) -> None:
+        self._chest_types = chest_types
+        self._chest_combo["values"] = chest_types
+        if chest_types and not self._chest_var.get():
+            self._chest_var.set(chest_types[0])
+
     def load_dataframe(self, df: pd.DataFrame, item_prices: dict[str, float] | None = None) -> None:
-        """
-        Populate the treeview with *df*.
-        Columns are sorted: pinned first, then by item price descending.
-        *item_prices* keys should be lowercase.
-        """
         self._tree.delete(*self._tree.get_children())
         if df.empty:
             self._tree["columns"] = []
@@ -149,11 +177,6 @@ class ViewerTab:
         session_stats: db_handler.Stats,
         total_stats: db_handler.Stats | None = None,
     ) -> None:
-        """
-        Update stat labels.
-        If *total_stats* is provided, show session value with total in brackets.
-        e.g. "11 (124)" chests, "1 700 304 (1 258 304)" avg
-        """
         s = session_stats
         t = total_stats
 
@@ -189,6 +212,9 @@ class ViewerTab:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _on_combo(self, _event: tk.Event | None = None) -> None:  # type: ignore[type-arg]
+        self._on_chest_selected(self._chest_var.get())
+
     def _on_checkbox(self) -> None:
         self._on_session_toggle(self._session_var.get())
 
@@ -202,21 +228,11 @@ class ViewerTab:
 
     @staticmethod
     def _sort_columns(cols: list[str], item_prices: dict[str, float]) -> list[str]:
-        """
-        Sort columns: pinned first (in PINNED_COLUMNS order),
-        then remaining item columns by price descending.
-        """
-        pinned_lower = [p.lower() for p in PINNED_COLUMNS]
-
         pinned = [c for c in PINNED_COLUMNS if c in cols]
         unpinned = [c for c in cols if c not in pinned]
-
-        def price_key(col: str) -> float:
-            return -item_prices.get(col.lower(), 0.0)
-
-        unpinned.sort(key=price_key)
+        unpinned.sort(key=lambda c: -item_prices.get(c.lower(), 0.0))
         return pinned + unpinned
 
     @staticmethod
     def _fmt(value: float) -> str:
-        return f"{int(value):,}".replace(",", " ") if value == int(value) else f"{value:,.0f}".replace(",", " ")
+        return f"{int(value):,}".replace(",", " ")

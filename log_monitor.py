@@ -175,10 +175,10 @@ class LogMonitor:
     def _process_line(self, line: str) -> None:
         """Parse a single log line and fire the appropriate callback."""
         # --- Chest detection ---
+        # Fire for any supported chest type — the app auto-switches context
         for chest_name in self.chest_types:
             if chest_name in line:
-                if chest_name == self.selected_chest:
-                    self._on_chest_detected(chest_name)
+                self._on_chest_detected(chest_name)
                 return
 
         if not self._awaiting_loot:

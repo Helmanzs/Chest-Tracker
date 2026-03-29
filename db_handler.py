@@ -15,6 +15,7 @@ calculate_statistics(chest_type, item_prices) -> Stats
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Any, Optional
 
 # supabase-py is a required dependency
@@ -32,6 +33,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _client: Any = None  # supabase.Client when connected
+_client_lock = threading.Lock()  # serialise concurrent requests on Windows HTTP/2
+_SUPABASE_URL: str = ""
+_SUPABASE_KEY: str = ""
 
 
 def init(url: str, key: str) -> bool:
@@ -48,10 +52,13 @@ def init(url: str, key: str) -> bool:
         print("[db] Supabase credentials not configured in tracker_config.txt")
         return False
     try:
+        global _SUPABASE_URL, _SUPABASE_KEY
         assert create_client is not None
+        _SUPABASE_URL = url
+        _SUPABASE_KEY = key
         _client = create_client(url, key)
         # Quick connectivity check
-        _client.table("chests").select("id").limit(1).execute()
+        _execute_with_retry(lambda: _client.table("chests").select("id").limit(1))
         print("[db] Connected to Supabase successfully")
         return True
     except Exception as exc:
@@ -62,6 +69,38 @@ def init(url: str, key: str) -> bool:
 
 def is_connected() -> bool:
     return _client is not None
+
+
+def _execute_with_retry(build_query: "Any", retries: int = 3) -> "Any":
+    """
+    Execute a Supabase query with retries and a lock to prevent
+    concurrent HTTP/2 socket issues on Windows.
+    """
+    global _client
+    import time
+
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with _client_lock:
+                return build_query().execute()
+        except Exception as exc:
+            last_exc = exc
+            err = str(exc)
+            # WinError 10035 = socket would block; reconnect and retry
+            if "10035" in err or "ReadError" in err or "ConnectError" in err:
+                print(f"[db] socket error (attempt {attempt + 1}/{retries}): {exc}")
+                time.sleep(0.5 * (attempt + 1))
+                # Recreate client on persistent socket errors
+                if attempt >= 1 and _SUPABASE_URL and create_client is not None:
+                    try:
+                        with _client_lock:
+                            _client = create_client(_SUPABASE_URL, _SUPABASE_KEY)
+                    except Exception:
+                        pass
+            else:
+                raise
+    raise last_exc or RuntimeError("Query failed after retries")
 
 
 # ---------------------------------------------------------------------------
@@ -125,15 +164,17 @@ def write_chest_loot(
 
     try:
         # 1. Insert the chest record and get its new id
-        chest_resp = _client.table("chests").insert({"chest_type": chest_type}).execute()
+        chest_resp = _execute_with_retry(lambda: (_client.table("chests").insert({"chest_type": chest_type})))
         chest_id: int = chest_resp.data[0]["id"]
 
         # 2. Insert all loot rows in one batch
         loot_rows = [{"chest_id": chest_id, "item_name": item.strip(), "quantity": qty} for qty, item in loot]
-        _client.table("chest_loot").insert(loot_rows).execute()
+        _execute_with_retry(lambda: _client.table("chest_loot").insert(loot_rows))
 
         # 3. Count total chests of this type (for chest number display)
-        count_resp = _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).execute()
+        count_resp = _execute_with_retry(
+            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+        )
         chest_number = count_resp.count or 0
 
         # 4. Calculate revenue locally using prices
@@ -170,12 +211,13 @@ def fetch_chests(chest_type: str) -> list[ChestRow]:
     if _client is None:
         return []
     try:
-        resp = (
-            _client.table("chests")
-            .select("id, chest_type, recorded_at")
-            .eq("chest_type", chest_type)
-            .order("recorded_at")
-            .execute()
+        resp = _execute_with_retry(
+            lambda: (
+                _client.table("chests")
+                .select("id, chest_type, recorded_at")
+                .eq("chest_type", chest_type)
+                .order("recorded_at")
+            )
         )
         return [
             ChestRow(
@@ -215,30 +257,42 @@ def fetch_loot_for_chest(chest_id: int) -> list[LootRow]:
 def fetch_all_loot(chest_type: str) -> list[dict]:
     """
     Return a flat list of dicts {chest_id, recorded_at, item_name, quantity}
-    for all chests of *chest_type*.  Used for statistics and the viewer table.
+    for all chests of *chest_type*.
+
+    Uses !inner join so Supabase filters server-side — avoids the bug where
+    a regular join returns all rows with null chest_info for non-matching rows.
+    Paginates to handle large datasets.
     """
     if _client is None:
         return []
     try:
-        resp = (
-            _client.table("chest_loot")
-            .select("chest_id, item_name, quantity, chests(chest_type, recorded_at)")
-            .eq("chests.chest_type", chest_type)
-            .execute()
-        )
-        results = []
-        for r in resp.data:
-            chest_info = r.get("chests") or {}
-            if not chest_info or chest_info.get("chest_type") != chest_type:
-                continue
-            results.append(
-                {
-                    "chest_id": r["chest_id"],
-                    "recorded_at": chest_info.get("recorded_at", ""),
-                    "item_name": r["item_name"],
-                    "quantity": r["quantity"],
-                }
+        results: list[dict] = []
+        page_size = 1000
+        offset = 0
+        while True:
+            resp = (
+                _client.table("chest_loot")
+                .select("chest_id, item_name, quantity, chests!inner(chest_type, recorded_at)")
+                .eq("chests.chest_type", chest_type)
+                .range(offset, offset + page_size - 1)
+                .execute()
             )
+            rows = resp.data
+            if not rows:
+                break
+            for r in rows:
+                chest_info = r.get("chests") or {}
+                results.append(
+                    {
+                        "chest_id": r["chest_id"],
+                        "recorded_at": chest_info.get("recorded_at", ""),
+                        "item_name": r["item_name"],
+                        "quantity": r["quantity"],
+                    }
+                )
+            if len(rows) < page_size:
+                break
+            offset += page_size
         return results
     except Exception as exc:
         print(f"[db] fetch_all_loot error: {exc}")
@@ -256,38 +310,44 @@ def calculate_statistics(
 ) -> Stats:
     """
     Compute aggregate revenue statistics for *chest_type* using local prices.
-    Fetches all loot from Supabase, groups by chest, sums revenue per chest.
+    Uses !inner join + pagination — no large ID lists passed over the wire.
     """
     if _client is None:
         return Stats()
 
-    chests = fetch_chests(chest_type)
-    if not chests:
+    # Get total chest count
+    count_resp = _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).execute()
+    total_chests = count_resp.count or 0
+    if total_chests == 0:
         return Stats(total_chests=0)
 
-    total_chests = len(chests)
-    chest_ids = {c.id for c in chests}
-
-    # Fetch all loot for these chests in one query
-    try:
-        resp = (
-            _client.table("chest_loot")
-            .select("chest_id, item_name, quantity")
-            .in_("chest_id", list(chest_ids))
-            .execute()
-        )
-        loot_rows = resp.data
-    except Exception as exc:
-        print(f"[db] calculate_statistics loot fetch error: {exc}")
-        return Stats(total_chests=total_chests)
-
-    # Sum revenue across all loot rows
+    # Fetch all loot via server-side join, paginated
     total_revenue = 0.0
-    for row in loot_rows:
-        item_key = row["item_name"].strip().lower()
-        qty = row["quantity"]
-        if item_key in item_prices:
-            total_revenue += qty * item_prices[item_key]
+    page_size = 1000
+    offset = 0
+    while True:
+        try:
+            resp = (
+                _client.table("chest_loot")
+                .select("item_name, quantity, chests!inner(chest_type)")
+                .eq("chests.chest_type", chest_type)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+        except Exception as exc:
+            print(f"[db] calculate_statistics fetch error: {exc}")
+            break
+        rows = resp.data
+        if not rows:
+            break
+        for row in rows:
+            item_key = row["item_name"].strip().lower()
+            qty = row["quantity"]
+            if item_key in item_prices:
+                total_revenue += qty * item_prices[item_key]
+        if len(rows) < page_size:
+            break
+        offset += page_size
 
     avg = total_revenue / total_chests if total_chests else 0.0
     return Stats(
@@ -295,11 +355,6 @@ def calculate_statistics(
         total_revenue=total_revenue,
         avg_revenue_per_chest=avg,
     )
-
-
-# ---------------------------------------------------------------------------
-# Streak calculation
-# ---------------------------------------------------------------------------
 
 
 def calculate_streak(chest_type: str, item_name: str) -> dict:
@@ -383,7 +438,9 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
         return {}
     try:
         # Get total chest count server-side — no ID list needed
-        count_resp = _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).execute()
+        count_resp = _execute_with_retry(
+            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+        )
         total = count_resp.count or 0
         if total == 0:
             return {}
@@ -395,13 +452,14 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
         offset = 0
 
         while True:
-            resp = (
-                _client.table("chest_loot")
-                .select("chest_id, item_name, quantity, chests!inner(chest_type)")
-                .eq("chests.chest_type", chest_type)
-                .gt("quantity", 0)
-                .range(offset, offset + page_size - 1)
-                .execute()
+            resp = _execute_with_retry(
+                lambda off=offset: (
+                    _client.table("chest_loot")
+                    .select("chest_id, item_name, quantity, chests!inner(chest_type)")
+                    .eq("chests.chest_type", chest_type)
+                    .gt("quantity", 0)
+                    .range(off, off + page_size - 1)
+                )
             )
             rows = resp.data
             if not rows:
@@ -430,11 +488,12 @@ def fetch_chests_by_ids(chest_ids: list[int]) -> list[dict]:
     if _client is None or not chest_ids:
         return []
     try:
-        resp = (
-            _client.table("chest_loot")
-            .select("chest_id, item_name, quantity, chests(chest_type, recorded_at)")
-            .in_("chest_id", chest_ids)
-            .execute()
+        resp = _execute_with_retry(
+            lambda: (
+                _client.table("chest_loot")
+                .select("chest_id, item_name, quantity, chests(chest_type, recorded_at)")
+                .in_("chest_id", chest_ids)
+            )
         )
         results = []
         for r in resp.data:
@@ -461,7 +520,9 @@ def calculate_statistics_for_ids(
     if _client is None or not chest_ids:
         return Stats()
     try:
-        resp = _client.table("chest_loot").select("item_name, quantity").in_("chest_id", chest_ids).execute()
+        resp = _execute_with_retry(
+            lambda: (_client.table("chest_loot").select("item_name, quantity").in_("chest_id", chest_ids))
+        )
         total_revenue = 0.0
         for row in resp.data:
             key = row["item_name"].strip().lower()
@@ -477,3 +538,61 @@ def calculate_statistics_for_ids(
     except Exception as exc:
         print(f"[db] calculate_statistics_for_ids error: {exc}")
         return Stats()
+
+
+# ---------------------------------------------------------------------------
+# All-chest startup fetch
+# ---------------------------------------------------------------------------
+
+
+def fetch_all_chest_stats(
+    chest_types: list[str],
+    all_prices: dict[str, dict[str, float]],
+) -> dict[str, "Stats"]:
+    """
+    Return {chest_type: Stats} for every chest type in one pass.
+    Uses !inner join + pagination per chest type.
+    """
+    return {
+        ct: calculate_statistics(ct, {k.lower(): v for k, v in all_prices.get(ct, {}).items()}) for ct in chest_types
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-item average quantity
+# ---------------------------------------------------------------------------
+
+
+def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
+    """
+    Return the average quantity of *item_name* per chest for *chest_type*.
+    Returns None if there is no data yet.
+    Only counts chests where the item actually dropped (quantity > 0).
+    """
+    if _client is None:
+        return None
+    try:
+        count_resp = _execute_with_retry(
+            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+        )
+        total_chests = count_resp.count or 0
+        if total_chests == 0:
+            return None
+
+        resp = _execute_with_retry(
+            lambda: (
+                _client.table("chest_loot")
+                .select("quantity, chests!inner(chest_type)")
+                .eq("chests.chest_type", chest_type)
+                .eq("item_name", item_name)
+                .gt("quantity", 0)
+            )
+        )
+        rows = resp.data
+        if not rows:
+            return None
+        total_qty = sum(r["quantity"] for r in rows)
+        return total_qty / total_chests
+    except Exception as exc:
+        print(f"[db] fetch_item_avg error: {exc}")
+        return None
