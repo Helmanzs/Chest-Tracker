@@ -43,4 +43,7 @@ jobs:
               uses: softprops/action-gh-release@v2
               with:
                   tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-                  files: ChestTracker.zip
+                  files: |
+                      ChestTracker.zip
+                      dist/*.exe
+                      prices_config.txt
