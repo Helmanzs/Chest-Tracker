@@ -33,7 +33,7 @@ jobs:
 
             - name: Build EXE
               run: |
-                  pyinstaller --onefile --noconsole --name "Chest Tracker" main.py
+                  pyinstaller --onefile --noconsole --name "ChestTracker" main.py
 
             - name: Zip files
               run: |

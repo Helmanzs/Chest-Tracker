@@ -77,6 +77,8 @@ def load_item_prices(excel_path: str, price_sheet: str) -> dict[str, float]:
 def export_to_excel(
     chest_type: str,
     loot_rows: list[dict],
+    drop_rates: dict[str, float] | None = None,
+    column_order: list[str] | None = None,
     output_path: str | None = None,
 ) -> str:
     """
@@ -84,9 +86,11 @@ def export_to_excel(
 
     Parameters
     ----------
-    chest_type  : used for the sheet name and default filename
-    loot_rows   : list of dicts with keys: chest_id, recorded_at, item_name, quantity
-    output_path : explicit save path; if None a timestamped filename is generated
+    chest_type   : used for the sheet name and default filename
+    loot_rows    : list of dicts with keys: chest_id, recorded_at, item_name, quantity
+    drop_rates   : {item_name: drop_pct} — written to a second sheet if provided
+    column_order : item column order to preserve from the viewer (optional)
+    output_path  : explicit save path; if None a timestamped filename is generated
 
     Returns the path the file was saved to.
     """
@@ -103,6 +107,15 @@ def export_to_excel(
         fill_value=0,
     ).reset_index()
     pivot.columns.name = None
+
+    # Reorder columns to match viewer display order
+    if column_order:
+        # Keep only columns that exist in pivot, in viewer order, then any remainder
+        meta_cols = [c for c in ["chest_id", "recorded_at"] if c in pivot.columns]
+        ordered_items = [c for c in column_order if c in pivot.columns and c not in meta_cols]
+        remaining = [c for c in pivot.columns if c not in meta_cols and c not in ordered_items]
+        pivot = pivot[meta_cols + ordered_items + remaining]
+
     pivot.insert(0, "#", range(1, len(pivot) + 1))
 
     # Build output path
@@ -113,17 +126,38 @@ def export_to_excel(
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    sheet_name = chest_type[:31]  # Excel sheet name limit
+    sheet_name = chest_type[:31]
     ws.title = sheet_name  # type: ignore[union-attr]
 
-    # Write header
+    # Write loot sheet header + data
     for col_idx, col_name in enumerate(pivot.columns, start=1):
         ws.cell(row=1, column=col_idx, value=col_name)  # type: ignore[union-attr]
-
-    # Write data
     for row_idx, row in enumerate(pivot.itertuples(index=False), start=2):
         for col_idx, value in enumerate(row, start=1):
             ws.cell(row=row_idx, column=col_idx, value=value)  # type: ignore[union-attr]
+
+    # Second sheet: drop rates
+    if drop_rates:
+        ws2 = wb.create_sheet(title="Drop Rates")
+        ws2.cell(row=1, column=1, value="Item")
+        ws2.cell(row=1, column=2, value="Drop Rate %")
+
+        # Sort by drop rate descending, preserving column_order for ties
+        def _rate_sort_key(item: str) -> tuple[float, int]:
+            rate = drop_rates.get(item, 0.0)
+            order_pos = column_order.index(item) if column_order and item in column_order else 9999
+            return (-rate, order_pos)
+
+        # Use item columns only (skip meta)
+        meta = {"#", "chest_id", "recorded_at"}
+        item_cols = [c for c in pivot.columns if c not in meta]
+        for row_idx, item in enumerate(sorted(item_cols, key=_rate_sort_key), start=2):
+            rate = drop_rates.get(item)
+            ws2.cell(row=row_idx, column=1, value=item)
+            if rate is None:
+                ws2.cell(row=row_idx, column=2, value="unknown")
+            else:
+                ws2.cell(row=row_idx, column=2, value=round(rate, 1))
 
     wb.save(output_path)
     return output_path

@@ -34,6 +34,9 @@ from log_monitor import LogMonitor
 from ui.mini_window import MiniWindow
 from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
+import updater
+
+APP_VERSION = "1.0.0"
 from ui.viewer_tab import ViewerTab
 
 
@@ -74,7 +77,7 @@ class App:
 
     def __init__(self, root: tk.Tk) -> None:
         self._root = root
-        self._root.title("Multi-Chest Tracker")
+        self._root.title(f"Multi-Chest Tracker v{APP_VERSION}")
         self._root.geometry("900x750")
         self._root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
@@ -124,6 +127,7 @@ class App:
             on_export=self._export_to_excel,
             on_session_toggle=self._on_session_toggle,
             on_chest_selected=self._on_viewer_chest_selected,
+            initial_chest=self._selected_chest,
         )
 
         self._prices_tab = PricesTab(
@@ -143,6 +147,7 @@ class App:
 
     def _startup(self) -> None:
         """Connect to DB and load prices after UI is fully built."""
+        threading.Thread(target=self._check_for_update, daemon=True).start()
         self._connect_db()
         self._load_all_prices_startup()
         self._refresh_db_view()
@@ -192,6 +197,44 @@ class App:
             self._prices_tab.apply_drop_rates(all_rates, all_stats)
 
         self._root.after(0, _log_stats)
+
+    def _check_for_update(self) -> None:
+        """Background thread: check GitHub for a newer release."""
+        result = updater.check_for_update(APP_VERSION)
+        if result.error:
+            self._log_threadsafe(f"[updater] {result.error}", "gray")
+            return
+        if not result.update_available:
+            self._log_threadsafe(f"App is up to date (v{APP_VERSION})", "gray")
+            return
+        # Newer version available — prompt on main thread
+        self._root.after(0, lambda: self._prompt_update(result))
+
+    def _prompt_update(self, result: updater.UpdateResult) -> None:
+        from tkinter import messagebox
+
+        lines = [
+            "A new version is available!",
+            "",
+            f"  Current:  v{result.current_version}",
+            f"  Latest:   {result.latest_version}",
+        ]
+        if result.release_notes:
+            lines += ["", "Changes:", result.release_notes, ""]
+        lines.append("Download and restart now?")
+        msg = "\n".join(lines)
+        if messagebox.askyesno("Update Available", msg):
+            self._log("Downloading update...", "blue")
+            updater.download_and_replace(
+                result,
+                on_progress=lambda m: self._log_threadsafe(m, "blue"),
+                on_complete=self._on_update_complete,
+            )
+
+    def _on_update_complete(self, success: bool, message: str) -> None:
+        self._log_threadsafe(message, "green" if success else "red")
+        if success:
+            self._root.after(1500, self._on_quit)
 
     def _connect_db(self) -> None:
         url = config.load("supabase_url")
@@ -609,24 +652,41 @@ class App:
 
     def _export_worker(self, path: str) -> None:
         try:
-            loot_rows = db_handler.fetch_all_loot(self._selected_chest)
+            chest_type = self._viewer.selected_chest() or self._selected_chest
+            loot_rows = db_handler.fetch_all_loot(chest_type)
             if not loot_rows:
                 self._root.after(
                     0,
                     lambda: messagebox.showwarning("No Data", "No chests recorded yet to export."),
                 )
                 return
-            saved_to = excel_handler.export_to_excel(self._selected_chest, loot_rows, path)
+            drop_rates = db_handler.fetch_drop_rates(chest_type)
+            # Build column order matching the prices tab sort
+            from ui.prices_tab import PINNED_ITEMS
+
+            prices = self._all_prices.get(chest_type, {})
+            pinned_lower = [p.lower() for p in PINNED_ITEMS]
+
+            def _col_sort(name: str) -> tuple[int, float]:
+                nl = name.lower()
+                pin = next((i for i, p in enumerate(pinned_lower) if p == nl), len(PINNED_ITEMS))
+                price = -prices.get(name, prices.get(name.lower(), 0.0))
+                return (pin, price if pin == len(PINNED_ITEMS) else 0.0)
+
+            column_order = sorted(prices.keys(), key=_col_sort)
+            saved_to = excel_handler.export_to_excel(
+                chest_type,
+                loot_rows,
+                drop_rates=drop_rates,
+                column_order=column_order,
+                output_path=path,
+            )
             self._log_threadsafe(f"Exported to {saved_to}", "green")
             self._root.after(0, lambda: messagebox.showinfo("Export Complete", f"Saved to:\n{saved_to}"))
         except Exception as exc:
             msg = f"Export failed: {exc}"
             self._log_threadsafe(msg, "red")
             self._root.after(0, lambda m=msg: messagebox.showerror("Export Error", m))
-
-    # ------------------------------------------------------------------
-    # Mini window + system tray
-    # ------------------------------------------------------------------
 
     def _toggle_mini(self) -> None:
         if self._mini is not None:

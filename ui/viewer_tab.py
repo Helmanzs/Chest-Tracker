@@ -47,6 +47,7 @@ class ViewerTab:
         on_export: Callable[[], None],
         on_session_toggle: Callable[[bool], None],
         on_chest_selected: Callable[[str], None],
+        initial_chest: str = "",
     ) -> None:
         self._parent = parent
         self._chest_types = chest_types
@@ -56,7 +57,9 @@ class ViewerTab:
         self._on_session_toggle = on_session_toggle
         self._on_chest_selected = on_chest_selected
         self._session_var = tk.BooleanVar(value=False)
-        self._chest_var = tk.StringVar(value=chest_types[0] if chest_types else "")
+        # Use initial_chest from config if valid, else first in list
+        default = initial_chest if initial_chest in chest_types else (chest_types[0] if chest_types else "")
+        self._chest_var = tk.StringVar(value=default)
         self._build()
 
     # ------------------------------------------------------------------
