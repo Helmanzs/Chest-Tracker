@@ -188,23 +188,23 @@ def _download_worker(
         bat_path = os.path.join(tempfile.gettempdir(), "chest_tracker_update.bat")
 
         # Write a batch script that waits for this process to exit,
-        # replaces the exe, then relaunches it
+        # then replaces the exe. Does NOT auto-relaunch — PyInstaller
+        # needs a clean temp dir which requires a fresh manual start.
         pid = os.getpid()
-        bat_content = f"""@echo off
-:wait
-tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait
-)
-move /y "{new_exe}" "{current_exe}"
-start "" "{current_exe}"
-del "%~f0"
-"""
+        bat_content = (
+            "@echo off\n"
+            ":wait\n"
+            f'tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul\n'
+            "if not errorlevel 1 (\n"
+            "    timeout /t 1 /nobreak >nul\n"
+            "    goto wait\n"
+            ")\n"
+            f'move /y "{new_exe}" "{current_exe}"\n'
+            'del "%~f0"\n'
+        )
         with open(bat_path, "w") as f:
             f.write(bat_content)
 
-        # Launch the batch script and exit
         import subprocess
 
         subprocess.Popen(
@@ -213,7 +213,7 @@ del "%~f0"
             close_fds=True,
         )
 
-        complete(True, f"Update to {result.latest_version} ready — restarting…")
+        complete(True, f"Update to {result.latest_version} downloaded — please restart the app.")
 
     except Exception as exc:
         complete(False, f"Update failed: {exc}")

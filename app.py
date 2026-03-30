@@ -36,7 +36,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 from ui.viewer_tab import ViewerTab
 
 
@@ -234,7 +234,15 @@ class App:
     def _on_update_complete(self, success: bool, message: str) -> None:
         self._log_threadsafe(message, "green" if success else "red")
         if success:
-            self._root.after(1500, self._on_quit)
+            from tkinter import messagebox
+
+            self._root.after(
+                0,
+                lambda: messagebox.showinfo(
+                    "Update Ready",
+                    f"{message}\n\nClose and reopen the app to use the new version.",
+                ),
+            )
 
     def _connect_db(self) -> None:
         url = config.load("supabase_url")
@@ -638,11 +646,13 @@ class App:
             messagebox.showwarning("Not Connected", "Not connected to Supabase!")
             return
 
+        export_chest = self._viewer.selected_chest() or self._selected_chest
+        safe_name = export_chest.replace("'", "").replace(" ", "_")
         path = filedialog.asksaveasfilename(
             title="Export to Excel",
             defaultextension=".xlsx",
             filetypes=[("Excel Files", "*.xlsx")],
-            initialfile=f"{self._selected_chest.replace(chr(39), '').replace(' ', '_')}_export.xlsx",
+            initialfile=f"{safe_name}_export.xlsx",
         )
         if not path:
             return
