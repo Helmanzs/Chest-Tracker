@@ -38,7 +38,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 from ui.viewer_tab import ViewerTab
 
 
@@ -306,6 +306,7 @@ class App:
             on_loot_item=self._on_loot_item,
             on_log=self._log_threadsafe,
             on_timeout=self._on_loot_timeout,
+            on_pattern_chest=self._on_pattern_chest_detected,
         )
         self._monitor.start()
 
@@ -345,6 +346,7 @@ class App:
                 on_loot_item=self._on_loot_item,
                 on_log=self._log_threadsafe,
                 on_timeout=self._on_loot_timeout,
+                on_pattern_chest=self._on_pattern_chest_detected,
             )
 
         self._on_chest_detected(chest_type)
@@ -398,6 +400,25 @@ class App:
         self._log(f"[!] {chest_name.upper()} DETECTED! Waiting for loot...", "blue")
         self._log("=" * 50, "blue")
         self._update_mini()
+
+    def _on_pattern_chest_detected(self, chest_name: str, loot: list[tuple[int, str]]) -> None:
+        """Called when a loot batch matches a pattern-detected chest signature."""
+        self._log_threadsafe(f"[!] {chest_name.upper()} DETECTED (pattern match)!", "blue")
+        # Switch context to this chest type
+        if chest_name != self._selected_chest:
+            self._selected_chest = chest_name
+            self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, chest_name)
+            self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_name, {}).items()}
+            self._tracker.set_item_prices(self._item_prices)
+            self._root.after(0, lambda ct=chest_name: self._viewer.set_selected_chest(ct))
+            self._mini_avg_revenue = 0.0
+            self._session = _Session()
+        # Write directly — loot is already complete from the free buffer
+        threading.Thread(
+            target=self._write_loot_to_db,
+            args=(loot,),
+            daemon=True,
+        ).start()
 
     def _on_loot_item(self, qty: int, item: str) -> None:
         colour = self._tracker.get_item_colour(item)

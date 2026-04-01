@@ -36,6 +36,10 @@ CHEST_DATA_SHEETS, CHEST_DISPLAY_NAMES, CHEST_COLORS = _build_chest_maps()
 # Other constants
 # ---------------------------------------------------------------------------
 
+# Pattern-detected chests loaded from tracker_config.txt [pattern_chests] section.
+# Edit that file to add new pattern chests without rebuilding.
+PATTERN_CHESTS: list[tuple[str, frozenset[str]]] = _config.load_pattern_chests()
+
 IGNORED_ITEMS: set[str] = {"yang"}
 NON_ITEM_COLUMNS: set[str] = {"#", "chest #", "chest", "date", "time", "timestamp"}
 DEFAULT_CHEST_TYPE: str = next(iter(CHEST_DATA_SHEETS), "")

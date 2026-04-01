@@ -384,3 +384,94 @@ def save_pinned_items(chest_type: str, items: list[str]) -> None:
             fh.writelines(lines)
     except OSError as exc:
         print(f"[config] save_pinned_items error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pattern chests  (stored in tracker_config.txt)
+# ─────────────────────────────────────────────────────────────────────────────
+# Format:
+#   [pattern_chests]
+#   # chest_name|item1,item2,...
+#   World Bounty Chest (Normal)|Monstrous Feather,Monstrous Claw
+
+_PATTERN_SECTION = "[pattern_chests]"
+
+_DEFAULT_PATTERN_CHESTS = [
+    ("World Bounty Chest (Normal)", ["Monstrous Feather", "Monstrous Claw"]),
+]
+
+
+def load_pattern_chests() -> list[tuple[str, frozenset[str]]]:
+    """
+    Return [(chest_name, frozenset_of_required_item_names_lowercase), ...]
+    Reads from [pattern_chests] in tracker_config.txt.
+    Writes defaults if section is absent.
+    """
+    if not CONFIG_FILE.exists():
+        _write_pattern_chests(_DEFAULT_PATTERN_CHESTS)
+        return _to_pattern_set(_DEFAULT_PATTERN_CHESTS)
+
+    results: list[tuple[str, list[str]]] = []
+    in_section = False
+    found = False
+
+    try:
+        with CONFIG_FILE.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped == _PATTERN_SECTION:
+                    in_section = True
+                    found = True
+                    continue
+                if stripped.startswith("[") and stripped != _PATTERN_SECTION:
+                    in_section = False
+                    continue
+                if not in_section or not stripped or stripped.startswith("#"):
+                    continue
+                if "|" in stripped:
+                    name, _, items_str = stripped.partition("|")
+                    items = [i.strip() for i in items_str.split(",") if i.strip()]
+                    results.append((name.strip(), items))
+    except OSError as exc:
+        print(f"[config] load_pattern_chests error: {exc}")
+
+    if not found:
+        _write_pattern_chests(_DEFAULT_PATTERN_CHESTS)
+        return _to_pattern_set(_DEFAULT_PATTERN_CHESTS)
+
+    return _to_pattern_set(results) if results else _to_pattern_set(_DEFAULT_PATTERN_CHESTS)
+
+
+def _to_pattern_set(
+    entries: list[tuple[str, list[str]]],
+) -> list[tuple[str, frozenset[str]]]:
+    return [(name, frozenset(i.lower() for i in items)) for name, items in entries]
+
+
+def _write_pattern_chests(entries: list[tuple[str, list[str]]]) -> None:
+    plain_lines: list[str] = []
+    in_section = False
+    if CONFIG_FILE.exists():
+        try:
+            with CONFIG_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if stripped == _PATTERN_SECTION:
+                        in_section = True
+                        continue
+                    if stripped.startswith("["):
+                        in_section = False
+                    if not in_section:
+                        plain_lines.append(line)
+        except OSError as exc:
+            print(f"[config] _write_pattern_chests read error: {exc}")
+    try:
+        with CONFIG_FILE.open("w", encoding="utf-8") as fh:
+            for line in plain_lines:
+                fh.write(line if line.endswith("\n") else line + "\n")
+            fh.write(f"\n{_PATTERN_SECTION}\n")
+            fh.write("# chest_name|required_item1,required_item2,...\n")
+            for name, items in entries:
+                fh.write(f"{name}|{','.join(items)}\n")
+    except OSError as exc:
+        print(f"[config] _write_pattern_chests write error: {exc}")

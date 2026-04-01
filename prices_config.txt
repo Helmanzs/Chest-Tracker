@@ -1,6 +1,3 @@
-pinned_items_Razadors_Chest=Shard,Energy Fragment
-pinned_items_Hellgates_Chest=Shard,Energy Fragment,Emblem Chest,Skill Book Chest [M-G]
-pinned_items_Chest_of_the_Owl_King=Shard,Energy Fragment,Storm Crystal Shard,Emblem Chest,Skill Book Chest [M-G],Companion Serum [50-250]
 [Razador's Chest]
 Shard=600
 Energy Fragment=1280
@@ -54,6 +51,7 @@ Fragment of a Pass [R-2]=45000
 Golden Hook=0
 Iron=0
 Mithril=0
+Etherplasma=110000
 
 [Nemere's Chest]
 Shard=600
@@ -217,7 +215,7 @@ Shard=600
 Storm Crystal Shard=199
 Green Owlbile=0
 Red Owlbile=0
-Blue Owlbil=0
+Blue Owlbile=0
 Green Owl Totem=550000
 Bright rough Diamond=2000000
 Red Kalant=1100000
@@ -237,4 +235,35 @@ Brown Belt=0
 Orange Yarn=0
 Black Yarn=0
 Emblem Chest=57000000
+
+[World Bounty Chest (Normal)]
+Shard=600
+Storm Crystal Shard=199
+Spirit Emblem Chest=28000000
+Aura Emblem Chest=270000000
+Magical Smithing Hammer=0
+Nataraja's Medallion=3000000
+Midnight Potion=8000000
+Hammer of Althor=0
+Althor's Cosmic Dust=0
+Book of Truth=18000000
+Bloodred Flower=1300000
+Monstrous Feather=1700000
+Monstrous Claw=250000
+Magical Dice=11500000
+Holy Stone=60000
+Etherplasma=110000
+Emblem Piece=2100000
+Emblem Chest=57000000
+Skill Book Chest [M-G]=1600000
+Companion Serum [50-250]=280000
+Yellow Belt=0
+Brown Belt=0
+Orange Yarn=0
+Black Yarn=0
+Ice-cold Pass=1750000
+Charred Pass=1700000
+Grass-covered Pass=1720000
+Hellish Pass=3000000
+Verdammter Runenstein=1000000
 
