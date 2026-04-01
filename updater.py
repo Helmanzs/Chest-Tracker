@@ -187,22 +187,41 @@ def _download_worker(
         new_exe = tmp_path
         bat_path = os.path.join(tempfile.gettempdir(), "chest_tracker_update.bat")
 
-        # Write a batch script that waits for this process to exit,
-        # then replaces the exe. Does NOT auto-relaunch — PyInstaller
-        # needs a clean temp dir which requires a fresh manual start.
+        # Write a batch script that:
+        # 1. Waits for this PID to fully exit
+        # 2. Retries the move up to 15 times (exe lock released after PyInstaller cleanup)
+        # 3. Logs result so we can diagnose failures
         pid = os.getpid()
-        bat_content = (
-            "@echo off\n"
-            ":wait\n"
-            f'tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul\n'
-            "if not errorlevel 1 (\n"
-            "    timeout /t 1 /nobreak >nul\n"
-            "    goto wait\n"
-            ")\n"
-            f'move /y "{new_exe}" "{current_exe}"\n'
-            'del "%~f0"\n'
-        )
-        with open(bat_path, "w") as f:
+        log_path = os.path.join(tempfile.gettempdir(), "chest_tracker_update.log")
+        bat_lines = [
+            "@echo off",
+            f'echo Waiting for PID {pid} to exit... > "{log_path}"',
+            ":wait_pid",
+            f'tasklist /fi "PID eq {pid}" 2>nul | find /i "{pid}" >nul',
+            "if not errorlevel 1 (",
+            "    timeout /t 1 /nobreak >nul",
+            "    goto wait_pid",
+            ")",
+            'echo Process exited. Waiting 2s for file lock release... >> "' + log_path + '"',
+            "timeout /t 2 /nobreak >nul",
+            "set RETRIES=0",
+            ":retry_move",
+            f'move /y "{new_exe}" "{current_exe}" >nul 2>&1',
+            "if errorlevel 1 (",
+            "    set /a RETRIES+=1",
+            "    if %RETRIES% LSS 15 (",
+            "        timeout /t 1 /nobreak >nul",
+            "        goto retry_move",
+            "    )",
+            '    echo FAILED to replace exe after %RETRIES% attempts >> "' + log_path + '"',
+            "    goto end",
+            ")",
+            f'echo SUCCESS: replaced exe >> "{log_path}"',
+            ":end",
+            'del "%~f0"',
+        ]
+        bat_content = "\r\n".join(bat_lines) + "\r\n"
+        with open(bat_path, "w", newline="") as f:
             f.write(bat_content)
 
         import subprocess
@@ -213,7 +232,7 @@ def _download_worker(
             close_fds=True,
         )
 
-        complete(True, f"Update to {result.latest_version} downloaded — please restart the app.")
+        complete(True, f"Update to {result.latest_version} downloaded — please close and reopen the app.")
 
     except Exception as exc:
         complete(False, f"Update failed: {exc}")
