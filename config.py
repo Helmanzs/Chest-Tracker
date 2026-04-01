@@ -102,20 +102,19 @@ def save(values: dict[str, str]) -> None:
 # Chest-sheet helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Default chest entries: name|display_name|hex_color
 _DEFAULT_CHEST_SHEETS: list[tuple[str, str, str]] = [
-    ("Razador's Chest", "Razador Chest Data", "Razador Loot Prices"),
-    ("Nemere's Chest", "Nemere Chest Data", "Nemere Loot Prices"),
-    ("Jotun Thrym's Chest", "Jotun Chest Data", "Jotun Loot Prices"),
-    ("Hellgates Chest", "Blue Death Chest Data", "Blue Death Loot Prices"),
+    ("Razador's Chest", "Razador", "#c0392b"),
+    ("Nemere's Chest", "Nemere", "#aed6f1"),
+    ("Jotun Thrym's Chest", "Jotun Thrym", "#a9dfbf"),
+    ("Hellgates Chest", "Blue Death", "#1a1a1a"),
 ]
 
 
 def load_chest_sheets() -> list[tuple[str, str, str]]:
     """
-    Return a list of (display_name, data_sheet, price_sheet) tuples.
-
-    Reads from the [chest_sheets] section of the config file.
-    If the section is absent the defaults are written and returned.
+    Return a list of (chest_name, display_name, hex_color) tuples.
+    Reads from the [chest_sheets] section; writes defaults if absent.
     """
     if not CONFIG_FILE.exists():
         _write_chest_sheets(_DEFAULT_CHEST_SHEETS)
@@ -152,7 +151,7 @@ def load_chest_sheets() -> list[tuple[str, str, str]]:
 
 
 def save_chest_sheets(entries: list[tuple[str, str, str]]) -> None:
-    """Persist a new list of (display_name, data_sheet, price_sheet) entries."""
+    """Persist a new list of (chest_name, display_name, hex_color) entries."""
     _write_chest_sheets(entries)
 
 
@@ -181,9 +180,9 @@ def _write_chest_sheets(entries: list[tuple[str, str, str]]) -> None:
             for line in plain_lines:
                 fh.write(line if line.endswith("\n") else line + "\n")
             fh.write(f"\n{_SECTION}\n")
-            fh.write("# display_name|data_sheet|price_sheet\n")
-            for name, data, price in entries:
-                fh.write(f"{name}{_SEP}{data}{_SEP}{price}\n")
+            fh.write("# chest_name|display_name|hex_color\n")
+            for name, display, color in entries:
+                fh.write(f"{name}{_SEP}{display}{_SEP}{color}\n")
     except OSError as exc:
         print(f"[config] write error in _write_chest_sheets: {exc}")
 
@@ -316,3 +315,72 @@ def sync_item_price(item_name: str, price: float) -> None:
                 changed = True
     if changed:
         save_all_prices(all_prices)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pinned items  (stored in prices_config.txt as pinned_items=Shard,Energy Fragment)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _pinned_key(chest_type: str) -> str:
+    """Config key for per-chest pinned items."""
+    safe = chest_type.replace("'", "").replace(" ", "_")
+    return f"pinned_items_{safe}"
+
+
+def load_pinned_items(chest_type: str) -> list[str]:
+    """Return the pinned item names for *chest_type* from prices_config.txt."""
+    from pathlib import Path
+
+    pf = Path("prices_config.txt")
+    key = _pinned_key(chest_type)
+    if not pf.exists():
+        return ["Shard", "Energy Fragment"]
+    try:
+        with pf.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith(f"{key}="):
+                    val = stripped[len(f"{key}=") :]
+                    return [x.strip() for x in val.split(",") if x.strip()]
+    except OSError:
+        pass
+    # Fall back to global pinned_items= if per-chest key absent
+    try:
+        with pf.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith("pinned_items="):
+                    val = stripped[len("pinned_items=") :]
+                    return [x.strip() for x in val.split(",") if x.strip()]
+    except OSError:
+        pass
+    return ["Shard", "Energy Fragment"]
+
+
+def save_pinned_items(chest_type: str, items: list[str]) -> None:
+    """Persist the pinned items list for *chest_type* to prices_config.txt."""
+    from pathlib import Path
+
+    pf = Path("prices_config.txt")
+    key = _pinned_key(chest_type)
+    lines: list[str] = []
+    found = False
+    if pf.exists():
+        try:
+            with pf.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip().startswith(f"{key}="):
+                        lines.append(f"{key}={','.join(items)}\n")
+                        found = True
+                    else:
+                        lines.append(line)
+        except OSError:
+            pass
+    if not found:
+        lines.insert(0, f"{key}={','.join(items)}\n")
+    try:
+        with pf.open("w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+    except OSError as exc:
+        print(f"[config] save_pinned_items error: {exc}")

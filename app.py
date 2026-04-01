@@ -28,6 +28,8 @@ import excel_handler
 from dataclasses import dataclass, field
 from constants import (
     CHEST_DATA_SHEETS,
+    CHEST_DISPLAY_NAMES,
+    CHEST_COLORS,
     DEFAULT_CHEST_TYPE,
 )
 from log_monitor import LogMonitor
@@ -36,7 +38,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 from ui.viewer_tab import ViewerTab
 
 
@@ -174,27 +176,30 @@ class App:
         self._tracker.set_item_prices(self._item_prices)
 
     def _startup_drop_rates(self) -> None:
-        """Fetch drop rates + per-chest stats for all chest types at startup."""
+        """Fetch drop rates, avg qtys, and per-chest stats for all chest types."""
         all_rates: dict[str, dict[str, float]] = {}
+        all_avgs: dict[str, dict[str, float]] = {}
         all_stats: dict[str, db_handler.Stats] = {}
         for chest_type in CHEST_DATA_SHEETS:
             all_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
+            all_avgs[chest_type] = db_handler.fetch_avg_quantities(chest_type)
             prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
             all_stats[chest_type] = db_handler.calculate_statistics(chest_type, prices)
             shard_avg = db_handler.fetch_item_avg(chest_type, "Shard")
             if shard_avg is not None:
                 self._shard_avgs[chest_type] = shard_avg
 
-        # Log per-chest summary
         def _log_stats() -> None:
+            from constants import CHEST_DISPLAY_NAMES
+
             for ct, st in all_stats.items():
-                short = ct.replace("'s Chest", "").replace(" Chest", "").strip()
+                short = CHEST_DISPLAY_NAMES.get(ct, ct.replace("'s Chest", "").replace(" Chest", "").strip())
                 if st.total_chests > 0:
                     self._log(
                         f"{short}: {st.total_chests} chests — avg {self._fmt(st.avg_revenue_per_chest)}",
                         "gray",
                     )
-            self._prices_tab.apply_drop_rates(all_rates, all_stats)
+            self._prices_tab.apply_drop_rates(all_rates, all_stats, all_avgs)
 
         self._root.after(0, _log_stats)
 
@@ -671,17 +676,16 @@ class App:
                 )
                 return
             drop_rates = db_handler.fetch_drop_rates(chest_type)
-            # Build column order matching the prices tab sort
-            from ui.prices_tab import PINNED_ITEMS
-
+            # Build column order: pinned items first, then by price desc
             prices = self._all_prices.get(chest_type, {})
-            pinned_lower = [p.lower() for p in PINNED_ITEMS]
+            pinned_for_chest = config.load_pinned_items(chest_type)
+            pinned_lower = [p.lower() for p in pinned_for_chest]
 
             def _col_sort(name: str) -> tuple[int, float]:
                 nl = name.lower()
-                pin = next((i for i, p in enumerate(pinned_lower) if p == nl), len(PINNED_ITEMS))
+                pin = next((i for i, p in enumerate(pinned_lower) if p == nl), len(pinned_lower))
                 price = -prices.get(name, prices.get(name.lower(), 0.0))
-                return (pin, price if pin == len(PINNED_ITEMS) else 0.0)
+                return (pin, price if pin == len(pinned_lower) else 0.0)
 
             column_order = sorted(prices.keys(), key=_col_sort)
             saved_to = excel_handler.export_to_excel(

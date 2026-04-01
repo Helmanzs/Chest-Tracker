@@ -596,3 +596,56 @@ def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
     except Exception as exc:
         print(f"[db] fetch_item_avg error: {exc}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Average quantity per item
+# ---------------------------------------------------------------------------
+
+
+def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
+    """
+    Return {item_name: avg_qty_per_chest} for all items in *chest_type*.
+    avg = total_quantity / total_chests  (includes chests where item did not drop).
+    """
+    if _client is None:
+        return {}
+    try:
+        count_resp = _execute_with_retry(
+            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+        )
+        total = count_resp.count or 0
+        if total == 0:
+            return {}
+
+        from collections import defaultdict
+
+        item_totals: dict[str, float] = defaultdict(float)
+        item_counts: dict[str, int] = defaultdict(int)  # chests where item dropped
+        page_size = 1000
+        offset = 0
+        while True:
+            resp = _execute_with_retry(
+                lambda off=offset: (
+                    _client.table("chest_loot")
+                    .select("item_name, quantity, chests!inner(chest_type)")
+                    .eq("chests.chest_type", chest_type)
+                    .gt("quantity", 0)
+                    .range(off, off + page_size - 1)
+                )
+            )
+            rows = resp.data
+            if not rows:
+                break
+            for r in rows:
+                item_totals[r["item_name"]] += r["quantity"]
+                item_counts[r["item_name"]] += 1
+            if len(rows) < page_size:
+                break
+            offset += page_size
+
+        # avg = total_qty / chests_where_it_dropped (not total chests)
+        return {name: item_totals[name] / item_counts[name] for name in item_totals if item_counts[name] > 0}
+    except Exception as exc:
+        print(f"[db] fetch_avg_quantities error: {exc}")
+        return {}
