@@ -28,6 +28,15 @@ ChestCallback = Callable[[str], None]  # (chest_name)
 TimeoutCallback = Callable[[], None]
 PatternCallback = Callable[[str, list[tuple[int, str]]], None]  # (chest_name, loot)
 
+# Items that can drop directly from a boss without opening a chest.
+# A loot batch containing ONLY these items (no Shard) is a boss drop, not a chest.
+_DIRECT_DROP_ITEMS: frozenset[str] = frozenset(
+    {
+        "dexterity of the smith (chest)",
+        "emblem chest",
+    }
+)
+
 _RE_TIMESTAMP = re.compile(r"(\[.*?\] \[.*?\]):")
 _RE_LOOT = re.compile(r"You receive (\d+) (.*?)\.")
 
@@ -77,6 +86,8 @@ class LogMonitor:
         self._timeout_thread: threading.Thread | None = None
         # Cache pattern chest names so named-detection skips them
         self._pattern_names: frozenset[str] = frozenset(name for name, _ in PATTERN_CHESTS)
+        # Pending chest: detected by name but not yet confirmed by loot
+        self._pending_chest: str | None = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -123,6 +134,7 @@ class LogMonitor:
         self._target_timestamp = None
         self._captured_loot = []
         self._last_loot_time = None
+        self._pending_chest = None
 
     # ------------------------------------------------------------------
     # Line parsing  (defined before the thread methods so linter is happy)
@@ -136,7 +148,9 @@ class LogMonitor:
             if chest_name in self._pattern_names:
                 continue  # detected by loot signature, not log text
             if chest_name in line:
-                self._on_chest_detected(chest_name)
+                # Don't fire yet — wait for first real loot item to confirm
+                # this is an actual chest opening, not a boss direct drop
+                self._pending_chest = chest_name
                 return
 
         # --- Require both timestamp and loot fields ---
@@ -163,6 +177,14 @@ class LogMonitor:
             self._free_loot = []
         self._free_loot.append((qty, item))
         self._free_last_time = time.time()
+
+        # --- Pending chest confirmation ---
+        # A pending chest is confirmed when a non-direct-drop item arrives.
+        # This prevents boss direct drops (Dex chest, Emblem chest) from
+        # triggering a chest detection before the real chest is opened.
+        if self._pending_chest is not None and item.lower() not in _DIRECT_DROP_ITEMS:
+            self._on_chest_detected(self._pending_chest)
+            self._pending_chest = None
 
         # --- Named-chest loot collection ---
         if not self._awaiting_loot:
@@ -240,5 +262,18 @@ class LogMonitor:
                 self._free_loot = []
                 self._free_ts = None
                 self._free_last_time = None
+
+            # Pending chest timeout — all items were direct drops, discard silently
+            if (
+                self._pending_chest is not None
+                and not self._awaiting_loot
+                and self._free_last_time is not None
+                and now - self._free_last_time >= self.loot_timeout
+            ):
+                self._on_log(
+                    f"Skipped direct boss drop for '{self._pending_chest}' (no chest items).",
+                    "gray",
+                )
+                self._pending_chest = None
 
             time.sleep(0.5)

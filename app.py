@@ -38,7 +38,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.0"
 from ui.viewer_tab import ViewerTab
 
 
@@ -438,50 +438,33 @@ class App:
     # DB writing
     # ------------------------------------------------------------------
 
-    # Items that can drop directly from a boss (not from the chest itself).
-    # If a loot batch contains ONLY these items and no Shard, it is a direct
-    # boss drop — skip silently without logging an error.
-    _DIRECT_DROP_ITEMS: frozenset[str] = frozenset(
-        {
-            "dexterity of the smith (chest)",
-            "emblem chest",
-        }
-    )
+    _SKIP_SILENT = "__skip_silent__"
 
     def _validate_loot(self, loot: list[tuple[int, str]]) -> str | None:
         """
         Return an error message if loot looks like a falsified/error report,
-        None if it passes, or the sentinel _SKIP_SILENT if it should be
-        silently ignored (direct boss drop, not a chest opening).
+        None if it passes, or _SKIP_SILENT to discard silently.
 
-        Rules
-        -----
-        - If no Shard present AND all items are known direct-drop-only items
-          → silent skip (boss drop, not a chest)
-        - If no Shard present for any other reason → error
+        By the time this runs, direct boss drops have already been filtered
+        by log_monitor (pending chest confirmation). So here we only check:
+        - Shard quantity must be > 0
         - Shard quantity must be <= avg_shard_qty * 2  (if avg is known)
         """
-        item_names_lower = {item.strip().lower() for _, item in loot}
         shard_qty = next(
             (qty for qty, item in loot if item.strip().lower() == "shard"),
             None,
         )
 
         if shard_qty is None or shard_qty == 0:
-            # Check if this looks like a direct boss drop
-            if item_names_lower.issubset(self._DIRECT_DROP_ITEMS):
-                return self._SKIP_SILENT
             return "Shard quantity is 0 — chest data looks incomplete. Not saved."
 
         avg = self._shard_avgs.get(self._selected_chest)
         if avg is not None and avg > 0 and shard_qty > avg * 2:
             return (
-                f"Shard quantity {shard_qty} is more than 2× the average "
+                f"Shard quantity {shard_qty} is more than 2x the average "
                 f"({avg:.0f}). Looks like an error — not saved."
             )
         return None
-
-    _SKIP_SILENT = "__skip_silent__"
 
     def _write_loot_to_db(self, loot: list[tuple[int, str]]) -> None:
         # Validate before writing
