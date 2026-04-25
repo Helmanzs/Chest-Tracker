@@ -39,7 +39,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 from ui.viewer_tab import ViewerTab
 
 
@@ -472,9 +472,9 @@ class App:
             return "Shard quantity is 0 — chest data looks incomplete. Not saved."
 
         avg = self._shard_avgs.get(self._selected_chest)
-        if avg is not None and avg > 0 and shard_qty > avg * 2:
+        if avg is not None and avg > 0 and shard_qty > avg * 3:
             return (
-                f"Shard quantity {shard_qty} is more than 2x the average "
+                f"Shard quantity {shard_qty} is more than 3x the average "
                 f"({avg:.0f}). Looks like an error — not saved."
             )
         return None
