@@ -39,7 +39,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 from ui.viewer_tab import ViewerTab
 
 

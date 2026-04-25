@@ -16,11 +16,11 @@ from __future__ import annotations
 
 CHEST_DEFINITIONS: list[tuple[str, str, str]] = [
     ("Razador's Chest", "Razador", "#c0392b"),
-    ("Nemere’s Chest", "Nemere", "#aed6f1"),
-    ("Jotun Thrym’s Chest", "Jotun Thrym", "#a9dfbf"),
+    ("Nemere's Chest", "Nemere", "#aed6f1"),
+    ("Jotun Thrym's Chest", "Jotun Thrym", "#a9dfbf"),
     ("Hellgates Chest", "Blue Death", "#1a1a1a"),
     ("Chest of the Owl King", "Natuhu", "#D6D192"),
-    ("Taliko’s Riches", "Taliko", "#9b59b6"),
+    ("Taliko's Riches", "Taliko", "#9b59b6"),
     ("Monkey God’s Treasure", "Hells Nightmare", "#e67e22"),
     ("Nalantir’s Legacy", "Nalantir", "#1abc9c"),
     ("Treasure of Thorns", "Nozdormu", "#27ae60"),
@@ -410,7 +410,7 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
         "Liquid Night",
         "Midnight Vessel",
     ],
-    "Nalantir's Legacy": [
+    "Nalantir’s Legacy": [
         "Shard",
         "Storm Crystal Shard",
         "Energy Fragment",

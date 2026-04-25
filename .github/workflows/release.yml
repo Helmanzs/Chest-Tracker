@@ -35,15 +35,10 @@ jobs:
               run: |
                   pyinstaller --onefile --noconsole --name "ChestTracker" main.py
 
-            - name: Zip files
-              run: |
-                  powershell Compress-Archive -Path dist/*.exe, prices_config.txt -DestinationPath ChestTracker.zip
-
             - name: Upload to Release
               uses: softprops/action-gh-release@v2
               with:
-                  tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+                  tag_name: ${{ github.event_name == 'workflow_dispatch' &&
+                      github.event.inputs.tag || github.ref_name }}
                   files: |
-                      ChestTracker.zip
                       dist/*.exe
-                      prices_config.txt
