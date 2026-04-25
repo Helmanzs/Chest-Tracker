@@ -7,6 +7,7 @@ Prices tab: horizontally scrollable card panels, one per chest type.
 - Pinned items are per-chest, stored in prices_config.txt, right-click to pin/unpin
 - Drop% and avg-drop-qty shown per item
 - Items re-sorted after drop rate refresh
+- Per-chest refresh button (only refreshes that chest's drop rates)
 - No full redraw on price edit — colour updated in-place
 """
 
@@ -17,8 +18,9 @@ from tkinter import ttk, messagebox
 from typing import Callable
 from collections import Counter
 
-import config
+import prices_config
 import db_handler
+from chest_definitions import DEFAULT_ITEMS
 
 _DEFAULT_HEADER = ("#555555", "white")
 
@@ -95,6 +97,38 @@ def _fmt_k(value: float) -> str:
 _WidgetTriple = tuple[tk.Label, tk.Label, tk.Entry]
 
 
+def _build_chest_vars(
+    chest_type: str,
+) -> dict[str, tk.StringVar]:
+    """
+    Build StringVar dict for a chest type.
+    Merges the static default item list with any user-set prices.
+    Items with no user price default to "0".
+    """
+    saved_prices = prices_config.load_prices(chest_type)
+    default_items = DEFAULT_ITEMS.get(chest_type, [])
+
+    # Start with all default items at 0
+    result: dict[str, tk.StringVar] = {}
+    for item in default_items:
+        result[item] = tk.StringVar(value="0")
+
+    # Overlay any user-saved prices (match case-insensitively)
+    saved_lower = {k.lower(): (k, v) for k, v in saved_prices.items()}
+    for item in list(result.keys()):
+        match = saved_lower.get(item.lower())
+        if match:
+            result[item].set(fmt_price(match[1]))
+
+    # Also add any user items that aren't in the default list
+    existing_lower = {k.lower() for k in result}
+    for item_name, price in saved_prices.items():
+        if item_name.lower() not in existing_lower:
+            result[item_name] = tk.StringVar(value=fmt_price(price))
+
+    return result
+
+
 class PricesTab:
     def __init__(
         self,
@@ -109,7 +143,7 @@ class PricesTab:
         self._vars: dict[str, dict[str, tk.StringVar]] = {}
         self._shared_items: set[str] = set()
 
-        # Per-chest pinned items
+        # Per-chest pinned items — loaded once from disk, kept in memory
         self._pinned: dict[str, list[str]] = {}
 
         # Live widget refs for in-place updates
@@ -159,18 +193,6 @@ class PricesTab:
             command=lambda: self._add_item_dialog(),
         ).pack(side=tk.LEFT, padx=(0, 6))
 
-        tk.Button(
-            toolbar,
-            text="Refresh Drop Rates",
-            font=("Arial", 10),
-            bg="#8e44ad",
-            fg="white",
-            relief=tk.FLAT,
-            padx=12,
-            pady=4,
-            command=self._refresh_drop_rates,
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
         self._sync_label = tk.Label(toolbar, text="", font=("Arial", 8), fg="#7f8c8d", bg="#f0f0f0")
         self._sync_label.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -203,17 +225,20 @@ class PricesTab:
     # ------------------------------------------------------------------
 
     def _load_all(self) -> None:
-        all_prices = config.load_all_prices()
+        # Load pinned items from disk for every chest type
+        for chest_type in self._chest_types:
+            self._pinned[chest_type] = prices_config.load_pinned_items(chest_type)
+
+        # Build vars merging defaults + saved prices
+        all_saved = prices_config.load_all_prices()
         name_count: Counter[str] = Counter()
-        for prices in all_prices.values():
-            for name in prices:
-                name_count[name.lower()] += 1
-        self._shared_items = {n for n, c in name_count.items() if c > 1}
 
         for chest_type in self._chest_types:
-            self._pinned[chest_type] = config.load_pinned_items(chest_type)
-            prices = all_prices.get(chest_type, {})
-            self._vars[chest_type] = {name: tk.StringVar(value=fmt_price(price)) for name, price in prices.items()}
+            self._vars[chest_type] = _build_chest_vars(chest_type)
+            for name in self._vars[chest_type]:
+                name_count[name.lower()] += 1
+
+        self._shared_items = {n for n, c in name_count.items() if c > 1}
         self._render_cards()
 
     def _render_cards(self, filter_text: str = "") -> None:
@@ -278,14 +303,33 @@ class PricesTab:
 
         hdr_bg, hdr_fg, short = _chest_display(chest_type)
 
+        # Header row: title + refresh button
+        hdr_frame = tk.Frame(card, bg=hdr_bg)
+        hdr_frame.pack(fill=tk.X)
+
         tk.Label(
-            card,
+            hdr_frame,
             text=short,
             font=("Arial", 12, "bold"),
             fg=hdr_fg,
             bg=hdr_bg,
             width=_CARD_W // 10,
-        ).pack(fill=tk.X, pady=(8, 2))
+            pady=8,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Per-chest refresh button
+        refresh_btn = tk.Button(
+            hdr_frame,
+            text="↻",
+            font=("Arial", 11, "bold"),
+            fg=hdr_fg,
+            bg=hdr_bg,
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=6,
+            command=lambda ct=chest_type: self._refresh_single_chest(ct),
+        )
+        refresh_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         avg_label = tk.Label(card, text="avg: —", font=("Arial", 8), fg=hdr_fg, bg=hdr_bg)
         avg_label.pack(fill=tk.X, pady=(0, 6))
@@ -539,40 +583,56 @@ class PricesTab:
             pass
 
     # ------------------------------------------------------------------
-    # Pin / unpin
+    # Pin / unpin — persists immediately to disk
     # ------------------------------------------------------------------
 
     def _toggle_pin(self, chest_type: str, item_name: str) -> None:
-        pinned = self._pinned.get(chest_type, [])
+        pinned = list(self._pinned.get(chest_type, []))
         lower = item_name.lower()
         if lower in [p.lower() for p in pinned]:
             pinned = [p for p in pinned if p.lower() != lower]
         else:
             pinned = pinned + [item_name]
         self._pinned[chest_type] = pinned
-        config.save_pinned_items(chest_type, pinned)
+        # Persist immediately so it survives app restart
+        prices_config.save_pinned_items(chest_type, pinned)
         self._render_cards(self._search_var.get())
 
     # ------------------------------------------------------------------
-    # Drop rates + avg qty
+    # Drop rates — per-chest refresh
     # ------------------------------------------------------------------
 
-    def _refresh_drop_rates(self) -> None:
-        self._sync_label.config(text="Fetching drop rates...")
+    def _refresh_single_chest(self, chest_type: str) -> None:
+        """Refresh drop rates/stats for a single chest only."""
+        _, _, short = _chest_display(chest_type)
+        self._sync_label.config(text=f"Refreshing {short}...")
         import threading
 
-        threading.Thread(target=self._fetch_drop_rates_worker, daemon=True).start()
+        threading.Thread(
+            target=self._fetch_single_chest_worker,
+            args=(chest_type,),
+            daemon=True,
+        ).start()
 
-    def _fetch_drop_rates_worker(self) -> None:
-        all_rates: dict[str, dict[str, float]] = {}
-        all_avgs: dict[str, dict[str, float]] = {}
-        all_stats: dict[str, db_handler.Stats] = {}
-        for chest_type in self._chest_types:
-            all_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
-            all_avgs[chest_type] = db_handler.fetch_avg_quantities(chest_type)
-            prices = {k.lower(): v for k, v in config.load_prices(chest_type).items()}
-            all_stats[chest_type] = db_handler.calculate_statistics(chest_type, prices)
-        self._parent.after(0, lambda: self.apply_drop_rates(all_rates, all_stats, all_avgs))
+    def _fetch_single_chest_worker(self, chest_type: str) -> None:
+        rates = db_handler.fetch_drop_rates(chest_type)
+        avgs = db_handler.fetch_avg_quantities(chest_type)
+        saved = prices_config.load_prices(chest_type)
+        prices_lower = {k.lower(): v for k, v in saved.items()}
+        stats = db_handler.calculate_statistics(chest_type, prices_lower)
+
+        def _apply() -> None:
+            self._drop_rates[chest_type] = rates
+            self._avg_qty[chest_type] = avgs
+            self._chest_stats[chest_type] = stats
+            # Rebuild only this chest's card widgets
+            self._render_cards(self._search_var.get())
+            self._update_avg_label(chest_type, rates)
+            _, _, short = _chest_display(chest_type)
+            self._sync_label.config(text=f"{short} refreshed")
+            self._parent.after(3000, lambda: self._sync_label.config(text=""))
+
+        self._parent.after(0, _apply)
 
     def apply_drop_rates(
         self,
@@ -580,6 +640,7 @@ class PricesTab:
         all_stats: dict[str, db_handler.Stats] | None = None,
         all_avgs: dict[str, dict[str, float]] | None = None,
     ) -> None:
+        """Called from app startup to bulk-load all chest drop data."""
         if all_stats is not None:
             self._chest_stats = all_stats
         if all_avgs is not None:
@@ -588,14 +649,13 @@ class PricesTab:
         for chest_type, rates in all_rates.items():
             self._drop_rates[chest_type] = rates
 
-        # Re-render to update drop%/avg columns and re-sort
-        # (this rebuilds _avg_labels, so update them AFTER)
         self._render_cards(self._search_var.get())
 
         for chest_type in self._chest_types:
             rates = self._drop_rates.get(chest_type, {})
             self._update_avg_label(chest_type, rates)
-        self._sync_label.config(text="Drop rates updated")
+
+        self._sync_label.config(text="Drop rates loaded")
         self._parent.after(3000, lambda: self._sync_label.config(text=""))
 
     def _update_avg_label(self, chest_type: str, rates: dict[str, float]) -> None:
@@ -607,10 +667,9 @@ class PricesTab:
         if stats is not None and stats.avg_revenue_per_chest > 0:
             text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}  ·  {stats.total_chests} chests"
         else:
-            expected = sum(
-                (rates.get(name, 0.0) / 100.0) * _safe_parse(sv.get())
-                for name, sv in self._vars.get(chest_type, {}).items()
-            )
+            saved = prices_config.load_prices(chest_type)
+            prices_lower = {k.lower(): v for k, v in saved.items()}
+            expected = sum((rates.get(name, 0.0) / 100.0) * prices_lower.get(name.lower(), 0.0) for name in rates)
             text = f"est. avg {_fmt_k(expected)}" if expected > 0 else "avg: —"
         try:
             avg_lbl.config(text=text, fg=hdr_fg, bg=hdr_bg)
@@ -647,7 +706,7 @@ class PricesTab:
         if errors:
             messagebox.showerror("Invalid Prices", "Fix these:\n" + "\n".join(errors))
             return
-        config.save_all_prices(all_prices)
+        prices_config.save_all_prices(all_prices)
         self._on_prices_changed(all_prices)
         self._sync_label.config(text="All prices saved")
         self._parent.after(3000, lambda: self._sync_label.config(text=""))

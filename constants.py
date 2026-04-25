@@ -1,44 +1,31 @@
 """
 constants.py
 ------------
-Chest-type mappings loaded dynamically from tracker_config.txt.
-
-Format of [chest_sheets] section:
-  chest_name|display_name|hex_color
-
-Example:
-  Razador's Chest|Razador|#c0392b
-  My New Chest|New Chest|#8e44ad
+Chest-type mappings loaded from chest_definitions.py (static, app-bundled).
+Users do not configure chest types — they are updated with the app.
 """
 
-import config as _config
+from chest_definitions import CHEST_DEFINITIONS, PATTERN_CHEST_DEFINITIONS
 
 # ---------------------------------------------------------------------------
-# Chest-type mappings  (loaded from config)
+# Build lookup dicts from static definitions
 # ---------------------------------------------------------------------------
 
+CHEST_DATA_SHEETS: dict[str, str] = {name: name for name, _, _ in CHEST_DEFINITIONS}
+CHEST_DISPLAY_NAMES: dict[str, str] = {name: display for name, display, _ in CHEST_DEFINITIONS}
+CHEST_COLORS: dict[str, str] = {name: color for name, _, color in CHEST_DEFINITIONS}
 
-def _build_chest_maps() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """Return (CHEST_DATA_SHEETS, CHEST_DISPLAY_NAMES, CHEST_COLORS)."""
-    data_sheets: dict[str, str] = {}  # chest_name -> chest_name (identity, kept for compat)
-    display_names: dict[str, str] = {}  # chest_name -> display_name
-    colors: dict[str, str] = {}  # chest_name -> hex_color
-    for chest_name, display_name, hex_color in _config.load_chest_sheets():
-        data_sheets[chest_name] = chest_name
-        display_names[chest_name] = display_name
-        colors[chest_name] = hex_color
-    return data_sheets, display_names, colors
+# ---------------------------------------------------------------------------
+# Pattern chests: detected by loot signature, not log text
+# ---------------------------------------------------------------------------
 
-
-CHEST_DATA_SHEETS, CHEST_DISPLAY_NAMES, CHEST_COLORS = _build_chest_maps()
+PATTERN_CHESTS: list[tuple[str, frozenset[str]]] = [
+    (name, frozenset(i.lower() for i in items)) for name, items in PATTERN_CHEST_DEFINITIONS
+]
 
 # ---------------------------------------------------------------------------
 # Other constants
 # ---------------------------------------------------------------------------
-
-# Pattern-detected chests loaded from tracker_config.txt [pattern_chests] section.
-# Edit that file to add new pattern chests without rebuilding.
-PATTERN_CHESTS: list[tuple[str, frozenset[str]]] = _config.load_pattern_chests()
 
 IGNORED_ITEMS: set[str] = {"yang"}
 NON_ITEM_COLUMNS: set[str] = {"#", "chest #", "chest", "date", "time", "timestamp"}

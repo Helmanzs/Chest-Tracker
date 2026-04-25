@@ -7,7 +7,7 @@ log monitor, db handler, and Excel price/export handler together.
 Data flow
 ---------
   Chest loot  →  db_handler   (Supabase)
-  Item prices →  config.load_prices()  (prices_config.txt)
+  Item prices →  prices_config.load_prices()  (prices_config.txt)
   Export      →  excel_handler.export_to_excel()   (on demand)
 
 System tray
@@ -23,6 +23,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 import config
+import prices_config
 import db_handler
 import excel_handler
 from dataclasses import dataclass, field
@@ -38,7 +39,7 @@ from ui.tracker_tab import TrackerTab
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 from ui.viewer_tab import ViewerTab
 
 
@@ -140,7 +141,7 @@ class App:
 
         self._mini: MiniWindow | None = None
 
-        # Defer startup tasks until after event loop starts
+        # Defer startup — check for Supabase key first
         self._root.after(0, self._startup)
 
     # ------------------------------------------------------------------
@@ -148,21 +149,61 @@ class App:
     # ------------------------------------------------------------------
 
     def _startup(self) -> None:
-        """Connect to DB and load prices after UI is fully built."""
+        """Check for Supabase key, show setup dialog if missing, then connect."""
         threading.Thread(target=self._check_for_update, daemon=True).start()
-        self._connect_db()
+
+        if config.has_supabase_config():
+            self._connect_db_and_load()
+        else:
+            self._show_setup_dialog()
+
+    def _show_setup_dialog(self, existing_key: str = "") -> None:
+        from ui.setup_dialog import SetupDialog
+
+        def on_success(url: str, key: str) -> None:
+            self._db_connected = True
+            self._log("Connected to Supabase ✓", "green")
+            self._post_connect_startup()
+
+        def on_cancel() -> None:
+            self._log(
+                "No Supabase key provided — database features disabled. "
+                "Add supabase_key to tracker_config.txt and restart.",
+                "orange",
+            )
+            self._load_all_prices_startup()
+            self._tracker.set_chest_types(list(CHEST_DATA_SHEETS.keys()))
+
+        SetupDialog(
+            parent=self._root,
+            on_success=on_success,
+            on_cancel=on_cancel,
+            existing_key=existing_key,
+        )
+
+    def _connect_db_and_load(self) -> None:
+        url = config.load("supabase_url")
+        key = config.load("supabase_key")
+        self._db_connected = db_handler.init(url, key)
+        if self._db_connected:
+            self._log("Connected to Supabase ✓", "green")
+            self._post_connect_startup()
+        else:
+            # Key present but invalid — show setup dialog again
+            self._log("Supabase connection failed — please re-enter your key.", "red")
+            self._show_setup_dialog(existing_key=key)
+
+    def _post_connect_startup(self) -> None:
+        """Run after DB connection is confirmed."""
         self._load_all_prices_startup()
         self._refresh_db_view()
-        # Pass chest types to tracker for the manual chest dialog
         self._tracker.set_chest_types(list(CHEST_DATA_SHEETS.keys()))
         if self._db_connected:
             threading.Thread(target=self._startup_drop_rates, daemon=True).start()
 
     def _load_all_prices_startup(self) -> None:
         """Load prices for every chest type and log a summary for each."""
-        from config import load_all_prices as _load_all
-
-        self._all_prices = _load_all()
+        self._all_prices = prices_config.load_all_prices()
         for chest_type in CHEST_DATA_SHEETS:
             prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
             count = len(prices)
@@ -212,7 +253,6 @@ class App:
         if not result.update_available:
             self._log_threadsafe(f"App is up to date (v{APP_VERSION})", "gray")
             return
-        # Newer version available — prompt on main thread
         self._root.after(0, lambda: self._prompt_update(result))
 
     def _prompt_update(self, result: updater.UpdateResult) -> None:
@@ -249,18 +289,6 @@ class App:
                 ),
             )
 
-    def _connect_db(self) -> None:
-        url = config.load("supabase_url")
-        key = config.load("supabase_key")
-        self._db_connected = db_handler.init(url, key)
-        if self._db_connected:
-            self._log("Connected to Supabase ✓", "green")
-        else:
-            self._log(
-                "Supabase not connected — set supabase_url and supabase_key in tracker_config.txt",
-                "red",
-            )
-
     # ------------------------------------------------------------------
     # File browsing callbacks
     # ------------------------------------------------------------------
@@ -269,10 +297,6 @@ class App:
         self._log_path = path
         self._log(f"Log file selected: {path}", "blue")
         self._save_config()
-
-    # ------------------------------------------------------------------
-    # Chest type selection
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Service start / stop
@@ -291,7 +315,7 @@ class App:
         if not self._db_connected:
             messagebox.showwarning(
                 "Not Connected",
-                "Not connected to Supabase.\nCheck supabase_url and supabase_key in tracker_config.txt",
+                "Not connected to Supabase.\nCheck your access key in tracker_config.txt",
             )
             return
 
@@ -404,7 +428,6 @@ class App:
     def _on_pattern_chest_detected(self, chest_name: str, loot: list[tuple[int, str]]) -> None:
         """Called when a loot batch matches a pattern-detected chest signature."""
         self._log_threadsafe(f"[!] {chest_name.upper()} DETECTED (pattern match)!", "blue")
-        # Switch context to this chest type
         if chest_name != self._selected_chest:
             self._selected_chest = chest_name
             self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, chest_name)
@@ -413,7 +436,6 @@ class App:
             self._root.after(0, lambda ct=chest_name: self._viewer.set_selected_chest(ct))
             self._mini_avg_revenue = 0.0
             self._session = _Session()
-        # Write directly — loot is already complete from the free buffer
         threading.Thread(
             target=self._write_loot_to_db,
             args=(loot,),
@@ -441,15 +463,6 @@ class App:
     _SKIP_SILENT = "__skip_silent__"
 
     def _validate_loot(self, loot: list[tuple[int, str]]) -> str | None:
-        """
-        Return an error message if loot looks like a falsified/error report,
-        None if it passes, or _SKIP_SILENT to discard silently.
-
-        By the time this runs, direct boss drops have already been filtered
-        by log_monitor (pending chest confirmation). So here we only check:
-        - Shard quantity must be > 0
-        - Shard quantity must be <= avg_shard_qty * 2  (if avg is known)
-        """
         shard_qty = next(
             (qty for qty, item in loot if item.strip().lower() == "shard"),
             None,
@@ -467,7 +480,6 @@ class App:
         return None
 
     def _write_loot_to_db(self, loot: list[tuple[int, str]]) -> None:
-        # Validate before writing
         error = self._validate_loot(loot)
         if error == self._SKIP_SILENT:
             self._log_threadsafe("Skipped direct boss drop (no Shard — not a chest opening).", "gray")
@@ -504,11 +516,9 @@ class App:
                 self._log_threadsafe(f"Top item: {name} ({self._fmt(val)})", "green")
 
         self._log_threadsafe("=" * 50 + "\n", "green")
-        # Update session immediately so mini window shows live data
         self._session.chest_ids.append(result.chest_id)
         self._session.total_revenue += result.chest_revenue
         self._session.chest_count += 1
-        # Update mini avg from session — always reflects active chest
         self._mini_avg_revenue = self._session.avg_revenue
         self._avg_revenue = self._session.avg_revenue
 
@@ -528,7 +538,6 @@ class App:
 
     def _refresh_db_view_worker(self) -> None:
         try:
-            # Snapshot mutable state before any async work
             chest_type = self._viewer.selected_chest() or self._selected_chest
             item_prices = dict(self._all_prices.get(chest_type, self._item_prices))
             item_prices_lower = {k.lower(): v for k, v in item_prices.items()}
@@ -563,7 +572,6 @@ class App:
     ) -> None:
         import pandas as pd
 
-        # Show session stats with total in brackets when they differ
         self._viewer.show_stats(session_stats, total_stats)
 
         if not loot_rows:
@@ -587,7 +595,6 @@ class App:
 
         self._viewer.load_dataframe(pivot, item_prices or self._item_prices)
 
-        # Log line: "Loaded 11 (124) chests — avg 1 700 304 (1 258 304), total 154 789 712"
         s, t = session_stats, total_stats
         chests_str = (
             f"{s.total_chests} ({t.total_chests})" if s.total_chests != t.total_chests else str(s.total_chests)
@@ -606,7 +613,6 @@ class App:
         self._refresh_db_view()
 
     def _on_viewer_chest_selected(self, chest_type: str) -> None:
-        """Called when the user picks a chest in the Excel Data tab."""
         self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, {}).items()}
         self._refresh_db_view()
 
@@ -616,7 +622,7 @@ class App:
 
     def _load_prices(self) -> None:
         """Load prices for current chest type from prices_config.txt."""
-        chest_prices = config.load_prices(self._selected_chest)
+        chest_prices = prices_config.load_prices(self._selected_chest)
         self._all_prices[self._selected_chest] = chest_prices
         self._item_prices = {k.lower(): v for k, v in chest_prices.items()}
         self._tracker.set_item_prices(self._item_prices)
@@ -680,9 +686,8 @@ class App:
                 )
                 return
             drop_rates = db_handler.fetch_drop_rates(chest_type)
-            # Build column order: pinned items first, then by price desc
             prices = self._all_prices.get(chest_type, {})
-            pinned_for_chest = config.load_pinned_items(chest_type)
+            pinned_for_chest = prices_config.load_pinned_items(chest_type)
             pinned_lower = [p.lower() for p in pinned_for_chest]
 
             def _col_sort(name: str) -> tuple[int, float]:
