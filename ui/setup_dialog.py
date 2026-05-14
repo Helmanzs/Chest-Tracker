@@ -1,156 +1,179 @@
 """
-ui/setup_dialog.py
-------------------
-Dialog shown on first launch (or when Supabase key is missing/invalid).
-Prompts the user for their Supabase key, validates it, and saves it.
+ui/setup_dialog.py  (Dear PyGui port)
+----------------------------------------
+Modal dialog shown on first launch to gather the Supabase access key.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk, messagebox
 from typing import Callable
+import dearpygui.dearpygui as dpg
+
+_DIALOG_TAG = "setup_dialog_win"
 
 
-class SetupDialog(tk.Toplevel):
+class SetupDialog:
     """
-    Modal dialog that asks the user for their Supabase access key.
-    The URL is hardcoded (provided by the developer).
+    Modal dialog asking for the Supabase access key.
 
     Parameters
     ----------
-    parent          : root Tk window
-    supabase_url    : the fixed URL baked into the app
-    on_success      : called with (url, key) when validation passes
-    on_cancel       : called if the user closes without a valid key
+    on_success : called with (url, key) when validated
+    on_cancel  : called if user closes without a valid key
+    existing_key : pre-fill the field if a key is already on disk
     """
 
-    # The Supabase URL is fixed — users only need the key
     SUPABASE_URL = "https://wwgczilevfjyivjmgoia.supabase.co"
 
     def __init__(
         self,
-        parent: tk.Tk,
         on_success: Callable[[str, str], None],
         on_cancel: Callable[[], None],
         existing_key: str = "",
     ) -> None:
-        super().__init__(parent)
-        self._parent = parent
         self._on_success = on_success
         self._on_cancel = on_cancel
-
-        self.title("Chest Tracker — Setup")
-        self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.attributes("-topmost", True)
-
-        self._key_var = tk.StringVar(value=existing_key)
-        self._status_var = tk.StringVar()
+        self._existing_key = existing_key
+        self._ids: dict[str, int | str] = {}
         self._build()
 
-        # Center on screen after widgets are built so geometry is accurate
-        self.update_idletasks()
-        sw = parent.winfo_screenwidth()
-        sh = parent.winfo_screenheight()
-        x = (sw - 480) // 2
-        y = (sh - 280) // 2
-        self.geometry(f"480x280+{x}+{y}")
-
-        self.lift()
-        self.grab_set()
-        self.focus_force()
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        tk.Label(
-            self,
-            text="Welcome to Chest Tracker",
-            font=("Arial", 14, "bold"),
-        ).pack(pady=(20, 4))
+        if dpg.does_item_exist(_DIALOG_TAG):
+            dpg.delete_item(_DIALOG_TAG)
 
-        tk.Label(
-            self,
-            text="Please enter your access key to connect to the database.",
-            font=("Arial", 9),
-            fg="#555",
-        ).pack(pady=(0, 12))
+        vw = dpg.get_viewport_width()
+        vh = dpg.get_viewport_height()
+        x = max(0, (vw - 480) // 2)
+        y = max(0, (vh - 300) // 2)
 
-        form = tk.Frame(self)
-        form.pack(fill=tk.X, padx=20, pady=6)
+        with dpg.window(
+            tag=_DIALOG_TAG,
+            label="Chest Tracker — Setup",
+            modal=True,
+            no_resize=True,
+            no_close=True,
+            width=480,
+            pos=[x, y],
+        ):
+            dpg.add_spacer(height=10)
+            dpg.add_text(
+                "Welcome to Chest Tracker",
+                color=(255, 255, 255, 255),
+            )
+            _make_bold(_DIALOG_TAG)
+            dpg.add_spacer(height=4)
+            dpg.add_text(
+                "Please enter your access key to connect to the database.",
+                color=(180, 180, 180, 255),
+                wrap=460,
+            )
+            dpg.add_spacer(height=12)
 
-        tk.Label(form, text="Access Key:", font=("Arial", 10, "bold"), anchor="w").grid(
-            row=0, column=0, sticky="w", pady=4
-        )
-        key_entry = tk.Entry(form, textvariable=self._key_var, width=44, show="")
-        key_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4)
-        key_entry.focus_set()
-        form.columnconfigure(1, weight=1)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Access Key:", indent=8)
+                self._ids["key_input"] = dpg.add_input_text(
+                    default_value=self._existing_key,
+                    width=300,
+                    label="",
+                    hint="Paste your Supabase key here",
+                    password=True,
+                    callback=lambda s, a: None,
+                )
 
-        # Show/hide toggle
-        self._show_key = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            form,
-            text="Show key",
-            variable=self._show_key,
-            command=lambda: key_entry.config(show="" if self._show_key.get() else "●"),
-        ).grid(row=1, column=1, sticky="w", padx=(8, 0))
+            dpg.add_spacer(height=4)
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=100)
+                self._ids["show_cb"] = dpg.add_checkbox(
+                    label="Show key",
+                    default_value=False,
+                    callback=self._toggle_show,
+                )
 
-        self._status_lbl = tk.Label(self, textvariable=self._status_var, font=("Arial", 9), fg="red")
-        self._status_lbl.pack(pady=(4, 0))
+            dpg.add_spacer(height=8)
+            self._ids["status"] = dpg.add_text("", color=(255, 80, 80, 255), wrap=460, indent=8)
+            dpg.add_spacer(height=8)
 
-        btn_row = tk.Frame(self)
-        btn_row.pack(pady=(10, 16))
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=100)
+                self._ids["connect_btn"] = dpg.add_button(
+                    label="Connect",
+                    width=100,
+                    height=32,
+                    callback=self._try_connect,
+                )
+                with dpg.theme() as green_theme:
+                    with dpg.theme_component(dpg.mvButton):
+                        dpg.add_theme_color(dpg.mvThemeCol_Button, (46, 204, 113, 220))
+                        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (46, 204, 113, 255))
+                        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (27, 152, 79, 255))
+                dpg.bind_item_theme(self._ids["connect_btn"], green_theme)
 
-        self._connect_btn = tk.Button(
-            btn_row,
-            text="Connect",
-            font=("Arial", 10, "bold"),
-            bg="#2ecc71",
-            fg="white",
-            relief=tk.FLAT,
-            padx=20,
-            pady=6,
-            command=self._try_connect,
-        )
-        self._connect_btn.pack(side=tk.LEFT, padx=(0, 10))
+                dpg.add_spacer(width=8)
+                dpg.add_button(
+                    label="Cancel",
+                    width=80,
+                    height=32,
+                    callback=self._cancel,
+                )
 
-        tk.Button(
-            btn_row,
-            text="Cancel",
-            font=("Arial", 10),
-            relief=tk.FLAT,
-            padx=12,
-            pady=6,
-            command=self._cancel,
-        ).pack(side=tk.LEFT)
+            dpg.add_spacer(height=10)
 
-        self.bind("<Return>", lambda _: self._try_connect())
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _toggle_show(self, sender, app_data) -> None:
+        key = self._ids.get("key_input")
+        if key and dpg.does_item_exist(key):
+            dpg.configure_item(key, password=not app_data)
 
     def _try_connect(self) -> None:
-        key = self._key_var.get().strip()
+        key_tag = self._ids.get("key_input")
+        status_tag = self._ids.get("status")
+        btn_tag = self._ids.get("connect_btn")
+
+        if not key_tag:
+            return
+        key = dpg.get_value(key_tag).strip()
         if not key:
-            self._status_var.set("Please enter an access key.")
+            if status_tag:
+                dpg.configure_item(status_tag, default_value="Please enter an access key.")
             return
 
-        self._status_var.set("Connecting…")
-        self._connect_btn.config(state="disabled")
-        self.update()
+        if status_tag:
+            dpg.configure_item(status_tag, default_value="Connecting…", color=(200, 200, 80, 255))
+        if btn_tag:
+            dpg.configure_item(btn_tag, enabled=False)
 
-        # Test connection
-        import db_handler
+        import threading, db_handler, config as _config
 
-        success = db_handler.init(self.SUPABASE_URL, key)
+        def _worker():
+            success = db_handler.init(self.SUPABASE_URL, key)
+            if success:
+                _config.save_supabase(self.SUPABASE_URL, key)
+                dpg.split_frame()
+                if dpg.does_item_exist(_DIALOG_TAG):
+                    dpg.delete_item(_DIALOG_TAG)
+                self._on_success(self.SUPABASE_URL, key)
+            else:
+                msg = "Invalid key or connection failed. Please check and try again."
+                if status_tag and dpg.does_item_exist(status_tag):
+                    dpg.configure_item(status_tag, default_value=msg, color=(255, 80, 80, 255))
+                if btn_tag and dpg.does_item_exist(btn_tag):
+                    dpg.configure_item(btn_tag, enabled=True)
 
-        if success:
-            import config as _config
-
-            _config.save_supabase(self.SUPABASE_URL, key)
-            self.destroy()
-            self._on_success(self.SUPABASE_URL, key)
-        else:
-            self._status_var.set("Invalid key or connection failed. Please check and try again.")
-            self._connect_btn.config(state="normal")
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _cancel(self) -> None:
-        self.destroy()
+        if dpg.does_item_exist(_DIALOG_TAG):
+            dpg.delete_item(_DIALOG_TAG)
         self._on_cancel()
+
+
+def _make_bold(parent: str | int) -> None:
+    """DPG doesn't have bold text natively — just a no-op placeholder."""
+    pass

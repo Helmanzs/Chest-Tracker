@@ -1,107 +1,133 @@
 """
-ui/mini_window.py
------------------
-Borderless, always-on-top overlay that shows live tracking status.
-Owns its own Toplevel widget and exposes a single update() method.
+ui/mini_window.py  (Dear PyGui port)
+--------------------------------------
+Mini HUD: shrinks the DPG viewport to a narrow strip, removes the OS title
+bar decoration, and pins the window always-on-top.
+
+On open:
+  - saves current viewport size, position, decoration state
+  - removes title bar (set_viewport_decorated(False))
+  - resizes to HUD dimensions
+  - sets always-on-top
+
+On close:
+  - restores all saved state
+  - shows primary_window again
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 from typing import Callable
+import dearpygui.dearpygui as dpg
 
 import config
 
+# HUD dimensions
+_HUD_W = 480
+_HUD_H = 36  # just the content row -- no title bar
+
+_BG_COL = (20, 20, 24, 255)
+
 
 class MiniWindow:
-    """
-    Small HUD overlay window.
-
-    Parameters
-    ----------
-    root        : parent Tk root
-    on_close    : called when the window is destroyed (lets the parent
-                  toggle the button label back)
-    """
-
-    _WIDTH = 450
-    _HEIGHT = 30
-    _BG = "#1a1a1a"
-
-    def __init__(self, root: tk.Tk, on_close: Callable[[], None]) -> None:
-        self._root = root
+    def __init__(self, on_close: Callable[[], None]) -> None:
         self._on_close = on_close
-        self._win: tk.Toplevel | None = None
+        self._alive = False
+        self._hud_tag = "mini_hud_content"
 
-        # Widgets updated via update()
-        self._status_indicator: tk.Label | None = None
-        self._status_text: tk.Label | None = None
-        self._expensive_item: tk.Label | None = None
-        self._revenue_label: tk.Label | None = None
+        # Save everything we will change
+        self._saved_w = dpg.get_viewport_width()
+        self._saved_h = dpg.get_viewport_height()
+        self._saved_decorated = dpg.is_viewport_decorated()
+
+        self._dot_id: int | str = 0
+        self._status_id: int | str = 0
+        self._item_id: int | str = 0
+        self._rev_id: int | str = 0
 
         self._build()
 
     # ------------------------------------------------------------------
-    # Construction
+    # Build
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        win = tk.Toplevel(self._root)
-        win.title("Chest Tracker")
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.protocol("WM_DELETE_WINDOW", self.close)
+        if dpg.does_item_exist(self._hud_tag):
+            dpg.delete_item(self._hud_tag)
 
-        x, y = self._load_position()
-        win.geometry(f"{self._WIDTH}x{self._HEIGHT}+{x}+{y}")
+        # ── Shrink OS window ────────────────────────────────────────
+        # Remove title bar so the strip has no wasted chrome
+        dpg.set_viewport_decorated(False)
+        # Allow the viewport to be as small as the HUD
+        dpg.set_viewport_min_width(100)
+        dpg.set_viewport_min_height(_HUD_H)
+        dpg.set_viewport_width(_HUD_W)
+        dpg.set_viewport_height(_HUD_H)
+        dpg.set_viewport_always_top(True)
 
-        # ── Main frame ──────────────────────────────────────────────
-        main = tk.Frame(win, bg=self._BG, relief=tk.RAISED, bd=1)
-        main.pack(fill=tk.BOTH, expand=True)
-        main.bind("<Button-1>", self._start_drag)
-        main.bind("<B1-Motion>", self._do_drag)
-        main.bind("<ButtonRelease-1>", self._save_position)
+        # Restore saved HUD position if any
+        try:
+            raw_x = config.load("mini_x")
+            raw_y = config.load("mini_y")
+            if raw_x and raw_y:
+                dpg.set_viewport_pos([int(raw_x), int(raw_y)])
+        except (ValueError, TypeError):
+            pass
 
-        content = tk.Frame(main, bg=self._BG)
-        content.pack(fill=tk.BOTH, expand=True, padx=6, pady=5)
+        # ── HUD window (fills the now-tiny viewport exactly) ────────
+        with dpg.window(
+            tag=self._hud_tag,
+            no_title_bar=True,
+            no_resize=True,
+            no_collapse=True,
+            no_close=True,
+            no_scrollbar=True,
+            no_scroll_with_mouse=True,
+            no_move=True,  # viewport drag handles movement
+            no_background=False,
+            width=_HUD_W,
+            height=_HUD_H,
+            pos=[0, 0],
+        ):
+            with dpg.theme() as _th:
+                with dpg.theme_component(dpg.mvWindowAppItem):
+                    dpg.add_theme_color(dpg.mvThemeCol_WindowBg, _BG_COL)
+                    dpg.add_theme_color(dpg.mvThemeCol_Border, (40, 40, 45, 255))
+                    dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 6)
+                    dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 0)
+            dpg.bind_item_theme(self._hud_tag, _th)
 
-        # ── Status indicator (left) ──────────────────────────────────
-        status_frame = tk.Frame(content, bg=self._BG)
-        status_frame.pack(side=tk.LEFT, padx=(0, 10))
+            with dpg.group(horizontal=True):
+                self._dot_id = dpg.add_text("*", color=(149, 165, 166, 255))
+                dpg.add_spacer(width=2)
+                self._status_id = dpg.add_text("READY", color=(149, 165, 166, 255))
+                dpg.add_text("  |", color=(55, 55, 60, 255))
+                dpg.add_spacer(width=6)
+                dpg.add_text("TOP:", color=(110, 120, 120, 255))
+                dpg.add_spacer(width=4)
+                self._item_id = dpg.add_text("-", color=(243, 156, 18, 255))
+                dpg.add_spacer(width=10)
+                dpg.add_text("AVG:", color=(110, 120, 120, 255))
+                dpg.add_spacer(width=4)
+                self._rev_id = dpg.add_text("N/A", color=(46, 204, 113, 255))
+                dpg.add_spacer(width=8)
+                close_btn = dpg.add_button(
+                    label="X",
+                    width=20,
+                    height=20,
+                    user_data=None,
+                    callback=self._on_close_btn,
+                )
+                with dpg.theme() as _cb:
+                    with dpg.theme_component(dpg.mvButton):
+                        dpg.add_theme_color(dpg.mvThemeCol_Button, (90, 35, 35, 220))
+                        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (180, 55, 55, 255))
+                        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (210, 40, 40, 255))
+                dpg.bind_item_theme(close_btn, _cb)
 
-        self._status_indicator = tk.Label(status_frame, text="●", font=("Arial", 10), fg="#95a5a6", bg=self._BG)
-        self._status_indicator.pack(side=tk.LEFT, padx=(0, 3))
-
-        self._status_text = tk.Label(status_frame, text="READY", font=("Arial", 7, "bold"), fg="#95a5a6", bg=self._BG)
-        self._status_text.pack(side=tk.LEFT)
-
-        # ── Separator ───────────────────────────────────────────────
-        tk.Label(content, text="|", font=("Arial", 9), fg="#444444", bg=self._BG).pack(side=tk.LEFT, padx=(0, 8))
-
-        # ── Top item (centre) ────────────────────────────────────────
-        tk.Label(content, text="TOP:", font=("Arial", 7, "bold"), fg="#7f8c8d", bg=self._BG).pack(
-            side=tk.LEFT, padx=(0, 4)
-        )
-
-        self._expensive_item = tk.Label(content, text="-", font=("Arial", 8), fg="#f39c12", bg=self._BG)
-        self._expensive_item.pack(side=tk.LEFT)
-
-        # ── Revenue (right) ──────────────────────────────────────────
-        revenue_frame = tk.Frame(content, bg=self._BG)
-        revenue_frame.pack(side=tk.RIGHT)
-
-        self._revenue_label = tk.Label(revenue_frame, text="N/A", font=("Arial", 8, "bold"), fg="#2ecc71", bg=self._BG)
-        self._revenue_label.pack(side=tk.RIGHT)
-
-        tk.Label(
-            revenue_frame,
-            text="REVENUE/CHEST:",
-            font=("Arial", 7, "bold"),
-            fg="#7f8c8d",
-            bg=self._BG,
-        ).pack(side=tk.RIGHT, padx=(10, 4))
-
-        self._win = win
+        # Hide the main tab UI so only the HUD shows
+        dpg.hide_item("primary_window")
+        self._alive = True
 
     # ------------------------------------------------------------------
     # Public interface
@@ -113,82 +139,59 @@ class MiniWindow:
         most_expensive: tuple[str, float],
         avg_revenue: float,
     ) -> None:
-        """Refresh all labels. Safe to call from any thread via root.after."""
-        if self._win is None:
+        if not self._alive:
             return
         try:
-            # Status dot
-            colour = "#2ecc71" if is_running else "#95a5a6"
+            colour = (46, 204, 113, 255) if is_running else (149, 165, 166, 255)
             label = "LIVE" if is_running else "READY"
-            self._status_indicator.config(fg=colour)  # type: ignore[union-attr]
-            self._status_text.config(text=label, fg=colour)  # type: ignore[union-attr]
+            if dpg.does_item_exist(self._dot_id):
+                dpg.configure_item(self._dot_id, color=colour)
+            if dpg.does_item_exist(self._status_id):
+                dpg.configure_item(self._status_id, default_value=label, color=colour)
 
-            # Most-expensive item
             item_name, item_value = most_expensive
-            if item_value > 0:
-                display = item_name[:27] + "..." if len(item_name) > 30 else item_name
-                self._expensive_item.config(text=display)  # type: ignore[union-attr]
-            else:
-                self._expensive_item.config(text="-")  # type: ignore[union-attr]
+            if dpg.does_item_exist(self._item_id):
+                if item_value > 0:
+                    display = (item_name[:24] + "...") if len(item_name) > 27 else item_name
+                    dpg.configure_item(self._item_id, default_value=display)
+                else:
+                    dpg.configure_item(self._item_id, default_value="-")
 
-            # Average revenue
-            if avg_revenue > 0:
-                text = f"{avg_revenue:,.0f}".replace(",", " ")
-                self._revenue_label.config(text=text)  # type: ignore[union-attr]
-            else:
-                self._revenue_label.config(text="N/A")  # type: ignore[union-attr]
+            if dpg.does_item_exist(self._rev_id):
+                text = f"{avg_revenue:,.0f}".replace(",", " ") if avg_revenue > 0 else "N/A"
+                dpg.configure_item(self._rev_id, default_value=text)
+
+            # Persist HUD position
+            pos = dpg.get_viewport_pos()
+            if pos:
+                config.save({"mini_x": str(pos[0]), "mini_y": str(pos[1])})
 
         except Exception as exc:
             print(f"[mini_window] update error: {exc}")
 
     def close(self) -> None:
-        """Destroy the window and notify the parent."""
-        if self._win is not None:
-            self._win.destroy()
-            self._win = None
+        self._alive = False
+        if dpg.does_item_exist(self._hud_tag):
+            dpg.delete_item(self._hud_tag)
+        self._restore()
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _on_close_btn(self, sender: int, app_data: object, user_data: object) -> None:
+        self.close()
         self._on_close()
 
-    # ------------------------------------------------------------------
-    # Drag handling
-    # ------------------------------------------------------------------
-
-    def _start_drag(self, event: tk.Event) -> None:  # type: ignore[type-arg]
-        if self._win:
-            self._win._drag_x = event.x  # type: ignore[attr-defined]
-            self._win._drag_y = event.y  # type: ignore[attr-defined]
-
-    def _do_drag(self, event: tk.Event) -> None:  # type: ignore[type-arg]
-        if self._win is None:
-            return
-        dx = event.x - self._win._drag_x  # type: ignore[attr-defined]
-        dy = event.y - self._win._drag_y  # type: ignore[attr-defined]
-        x = self._win.winfo_x() + dx
-        y = self._win.winfo_y() + dy
-        self._win.geometry(f"+{x}+{y}")
-
-    def _save_position(self, event: tk.Event | None = None) -> None:  # type: ignore[type-arg]
-        if self._win is None:
-            return
-        config.save(
-            {
-                "mini_x": str(self._win.winfo_x()),
-                "mini_y": str(self._win.winfo_y()),
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Position helpers
-    # ------------------------------------------------------------------
-
-    def _load_position(self) -> tuple[int, int]:
-        raw_x = config.load("mini_x")
-        raw_y = config.load("mini_y")
-        try:
-            if raw_x and raw_y:
-                return int(raw_x), int(raw_y)
-        except (ValueError, TypeError):
-            pass
-        # Default: bottom-centre of screen
-        sw = self._root.winfo_screenwidth()
-        sh = self._root.winfo_screenheight()
-        return (sw - self._WIDTH) // 2, sh - self._HEIGHT - 100
+    def _restore(self) -> None:
+        """Restore viewport to pre-mini state."""
+        dpg.set_viewport_always_top(False)
+        dpg.set_viewport_decorated(self._saved_decorated)
+        dpg.set_viewport_min_width(800)
+        dpg.set_viewport_min_height(600)
+        dpg.set_viewport_width(self._saved_w)
+        dpg.set_viewport_height(self._saved_h)
+        dpg.show_item("primary_window")

@@ -1,52 +1,55 @@
 """
-main.py
--------
+main.py  (Dear PyGui port)
+---------------------------
 Entry point. Enforces single instance via a named Windows mutex,
-then boots Tk and hands off to App.
+then boots Dear PyGui and hands off to App.
 """
 
 import sys
-import tkinter as tk
-from app import App
 
 
 def _acquire_single_instance_lock() -> object | None:
-    """
-    On Windows, create a named mutex. Returns the mutex handle on success,
-    or None/exits if another instance is already running.
-    On non-Windows platforms, returns a sentinel True (no-op).
-    """
     if sys.platform != "win32":
         return True
     try:
         import ctypes
-        import ctypes.wintypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32 = ctypes.windll.kernel32
         mutex = kernel32.CreateMutexW(None, True, "ChestTrackerSingleInstanceMutex")
         last_error = kernel32.GetLastError()
         if last_error == 183:  # ERROR_ALREADY_EXISTS
-            import tkinter.messagebox as mb
+            import dearpygui.dearpygui as dpg
 
-            root = tk.Tk()
-            root.withdraw()
-            mb.showwarning(
-                "Already Running",
-                "Chest Tracker is already open.\nCheck your taskbar or system tray.",
-            )
-            root.destroy()
+            dpg.create_context()
+            dpg.create_viewport(title="Already Running", width=400, height=120)
+            dpg.setup_dearpygui()
+            with dpg.window(label="Already Running", no_close=True):
+                dpg.add_text("Chest Tracker is already open.")
+                dpg.add_text("Check your taskbar or system tray.")
+                dpg.add_spacer(height=8)
+                dpg.add_button(
+                    label="OK",
+                    callback=lambda: dpg.stop_dearpygui(),
+                )
+            dpg.set_primary_window(dpg.last_container(), True)
+            dpg.show_viewport()
+            while dpg.is_dearpygui_running():
+                dpg.render_dearpygui_frame()
+            dpg.destroy_context()
             sys.exit(0)
-        return mutex  # keep reference alive for process lifetime
+        return mutex
     except Exception as exc:
         print(f"[main] single-instance check failed: {exc}")
         return True
 
 
 def main() -> None:
-    _mutex = _acquire_single_instance_lock()  # noqa: F841 — must stay in scope
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    _mutex = _acquire_single_instance_lock()  # noqa: F841
+
+    from app import App
+
+    application = App()
+    application.run()
 
 
 if __name__ == "__main__":

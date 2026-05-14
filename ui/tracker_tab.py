@@ -1,60 +1,64 @@
 """
-ui/tracker_tab.py
------------------
+ui/tracker_tab.py  (Dear PyGui port)
+-------------------------------------
 The "Live Tracker" tab: file configuration, start/stop controls,
 manual trigger, mini-mode toggle, and the scrolled log display.
-
-This class owns only presentation logic.  All heavy lifting (log
-monitoring, Excel I/O) is delegated back to the parent app via
-callbacks passed at construction.
 """
 
 from __future__ import annotations
 
-import os
-import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog
 from datetime import datetime
 from typing import Callable
+import dearpygui.dearpygui as dpg
 
 from constants import PRICE_TIER_HIGH, PRICE_TIER_MID
 
-
 LogCallback = Callable[[str, str], None]
+
+# Colour map: tag name -> RGBA tuple (0-255)
+_COLOURS: dict[str, tuple[int, int, int, int]] = {
+    "black": (220, 220, 220, 255),  # near-white on dark bg
+    "blue": (100, 160, 255, 255),
+    "green": (80, 200, 100, 255),
+    "red": (255, 80, 80, 255),
+    "orange": (255, 165, 40, 255),
+    "gray": (160, 160, 160, 255),
+    "light_gray": (120, 120, 120, 255),
+    "dark_red": (200, 60, 60, 255),
+    "purple": (180, 100, 255, 255),
+}
+
+# Max lines kept in the log buffer
+_MAX_LOG_LINES = 500
 
 
 class TrackerTab:
-    """
-    Builds and manages all widgets inside the Live Tracker tab frame.
-
-    Parameters
-    ----------
-    parent          : the ttk.Frame that is the tab container
-    on_start_stop   : called when the START/STOP button is pressed
-    on_manual       : called with chest_type str when manual chest is confirmed
-    on_mini_toggle  : called when MINI MODE is pressed
-    on_log_browse   : called with the new path when the user picks a log file
-    """
+    """Manages all widgets inside the Live Tracker tab."""
 
     def __init__(
         self,
-        parent: ttk.Frame,
+        parent_tag: str | int,
         on_start_stop: Callable[[], None],
         on_manual: Callable[[str], None],
         on_mini_toggle: Callable[[], None],
         on_log_browse: Callable[[str], None],
         initial_log_path: str = "",
     ) -> None:
-        self._parent = parent
+        self._parent = parent_tag
         self._on_start_stop = on_start_stop
-        self._on_manual: Callable[[str], None] = on_manual
+        self._on_manual = on_manual
         self._on_mini_toggle = on_mini_toggle
         self._on_log_browse = on_log_browse
 
-        # Prices cached here so get_item_color can work without app coupling
         self._item_prices: dict[str, float] = {}
         self._chest_types: list[str] = []
 
+        # Log lines stored as (text, colour_key) for re-render
+        self._log_lines: list[tuple[str, str]] = []
+
+        self._ids: dict[str, int | str] = {}
+        # Map str(button_tag) -> DPG theme integer ID for clean re-creation
+        self._btn_themes: dict[str, int] = {}
         self._build(initial_log_path)
 
     # ------------------------------------------------------------------
@@ -62,68 +66,69 @@ class TrackerTab:
     # ------------------------------------------------------------------
 
     def _build(self, log_path: str) -> None:
-        # ── File configuration ───────────────────────────────────────
-        cfg = tk.LabelFrame(self._parent, text=" File Configuration ", padx=10, pady=10)
-        cfg.pack(padx=10, pady=10, fill=tk.X)
+        with dpg.group(parent=self._parent):
+            # -- File config -----------------------------------------
+            with dpg.collapsing_header(label="File Configuration", default_open=True):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Log file:")
+                    self._ids["log_label"] = dpg.add_text(self._short(log_path), color=_COLOURS["blue"])
+                    dpg.add_button(label="Browse", callback=self._browse_log)
 
-        tk.Label(cfg, text="Log file:").grid(row=0, column=0, sticky="w")
-        self._log_label = tk.Label(cfg, text=self._short(log_path), fg="blue")
-        self._log_label.grid(row=0, column=1, sticky="w", padx=5)
-        tk.Button(cfg, text="Browse", command=self._browse_log).grid(row=0, column=2, pady=2)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Active chest:")
+                    self._ids["sheet_label"] = dpg.add_text("Auto-detect from log", color=_COLOURS["purple"])
 
-        tk.Label(cfg, text="Active chest:").grid(row=1, column=0, sticky="w")
-        self._sheet_label = tk.Label(cfg, text="Auto-detect from log", fg="purple")
-        self._sheet_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Manual chest:")
+                    self._ids["manual_combo"] = dpg.add_combo(
+                        items=[], label="", width=300, tag="tracker_manual_combo"
+                    )
 
-        # Manual chest selector — stays persistent, no popup dialog
-        tk.Label(cfg, text="Manual chest:").grid(row=2, column=0, sticky="w")
-        self._manual_combo = ttk.Combobox(cfg, state="readonly", width=28)
-        self._manual_combo.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+            dpg.add_spacer(height=4)
 
-        # ── Status ──────────────────────────────────────────────────
-        self._status_label = tk.Label(self._parent, text="Status: Ready", font=("Arial", 12, "bold"), fg="gray")
-        self._status_label.pack(pady=5)
+            # -- Status ----------------------------------------------
+            self._ids["status"] = dpg.add_text("Status: Ready", color=_COLOURS["gray"])
 
-        # ── Buttons ──────────────────────────────────────────────────
-        btn_row = tk.Frame(self._parent)
-        btn_row.pack(pady=10, padx=20, fill=tk.X)
+            dpg.add_spacer(height=4)
 
-        self._btn_toggle = tk.Button(
-            btn_row,
-            text="START LISTENING",
-            font=("Arial", 10, "bold"),
-            command=self._on_start_stop,
-            bg="#2ecc71",
-            fg="white",
-            height=2,
-        )
-        self._btn_toggle.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+            # -- Buttons ---------------------------------------------
+            with dpg.group(horizontal=True):
+                self._ids["btn_toggle"] = dpg.add_button(
+                    label="START LISTENING",
+                    width=200,
+                    height=36,
+                    callback=self._on_start_stop,
+                )
+                self._apply_button_theme(self._ids["btn_toggle"], (46, 204, 113))
 
-        tk.Button(
-            btn_row,
-            text="MANUAL CHEST",
-            font=("Arial", 10, "bold"),
-            command=self._manual_btn_pressed,
-            bg="#3498db",
-            fg="white",
-            height=2,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+                dpg.add_button(
+                    label="MANUAL CHEST",
+                    width=180,
+                    height=36,
+                    callback=self._manual_btn_pressed,
+                )
 
-        self._btn_mini = tk.Button(
-            btn_row,
-            text="MINI MODE",
-            font=("Arial", 10, "bold"),
-            command=self._on_mini_toggle,
-            bg="#9b59b6",
-            fg="white",
-            height=2,
-        )
-        self._btn_mini.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+                self._ids["btn_mini"] = dpg.add_button(
+                    label="MINI MODE",
+                    width=150,
+                    height=36,
+                    callback=self._on_mini_toggle,
+                )
+                self._apply_button_theme(self._ids["btn_mini"], (155, 89, 182))
 
-        # ── Log display ──────────────────────────────────────────────
-        self._log_display = scrolledtext.ScrolledText(self._parent, height=20, state="disabled", font=("Consolas", 10))
-        self._log_display.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-        self._init_colour_tags()
+            dpg.add_spacer(height=6)
+            dpg.add_separator()
+            dpg.add_spacer(height=4)
+
+            # -- Log display: child_window with one add_text per line --
+            # This is the only DPG way to get per-line colour in a log.
+            self._ids["log_display"] = dpg.add_child_window(
+                tag="tracker_log_display",
+                width=-1,
+                height=-1,
+                border=True,
+                no_scrollbar=False,
+            )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -131,48 +136,85 @@ class TrackerTab:
 
     def log(self, message: str, colour: str = "black") -> None:
         """Append a timestamped, coloured line to the log display."""
-        self._log_display.config(state="normal")
+        win = self._ids.get("log_display")
+        if not win or not dpg.does_item_exist(win):
+            return
+
         ts = datetime.now().strftime("%H:%M:%S")
-        self._log_display.insert(tk.END, f"[{ts}] ")
-        self._log_display.insert(tk.END, f"{message}\n", colour)
-        self._log_display.see(tk.END)
-        self._log_display.config(state="disabled")
+        line = f"[{ts}] {message}"
+        col = _COLOURS.get(colour, _COLOURS["black"])
+
+        # Add the new text widget as a child of the log window
+        dpg.add_text(line, color=col, parent=win)
+
+        # Trim oldest lines when buffer exceeds max
+        children: list[int] = dpg.get_item_children(win, 1) or []  # type: ignore[assignment]
+        while len(children) > _MAX_LOG_LINES:
+            dpg.delete_item(children[0])
+            children = children[1:]
+
+        # Defer scroll by one frame so DPG has laid out the new widget
+        _win = win
+        dpg.set_frame_callback(
+            dpg.get_frame_count() + 1,
+            callback=lambda: dpg.set_y_scroll(_win, dpg.get_y_scroll_max(_win)) if dpg.does_item_exist(_win) else None,
+        )
 
     def set_status(self, text: str, colour: str = "gray") -> None:
-        self._status_label.config(text=f"Status: {text}", fg=colour)
+        if dpg.does_item_exist(self._ids["status"]):
+            dpg.configure_item(
+                self._ids["status"],
+                default_value=f"Status: {text}",
+                color=_COLOURS.get(colour, _COLOURS["gray"]),
+            )
 
     def set_listening(self, listening: bool) -> None:
-        """Flip the START/STOP button appearance."""
+        if not dpg.does_item_exist(self._ids["btn_toggle"]):
+            return
         if listening:
-            self._btn_toggle.config(text="STOP LISTENING", bg="#e74c3c")
+            dpg.configure_item(self._ids["btn_toggle"], label="STOP LISTENING")
+            self._apply_button_theme(self._ids["btn_toggle"], (231, 76, 60))
         else:
-            self._btn_toggle.config(text="START LISTENING", bg="#2ecc71")
+            dpg.configure_item(self._ids["btn_toggle"], label="START LISTENING")
+            self._apply_button_theme(self._ids["btn_toggle"], (46, 204, 113))
 
     def set_mini_active(self, active: bool) -> None:
+        if not dpg.does_item_exist(self._ids["btn_mini"]):
+            return
         if active:
-            self._btn_mini.config(text="CLOSE MINI", bg="#e74c3c")
+            dpg.configure_item(self._ids["btn_mini"], label="CLOSE MINI")
+            self._apply_button_theme(self._ids["btn_mini"], (231, 76, 60))
         else:
-            self._btn_mini.config(text="MINI MODE", bg="#9b59b6")
+            dpg.configure_item(self._ids["btn_mini"], label="MINI MODE")
+            self._apply_button_theme(self._ids["btn_mini"], (155, 89, 182))
 
     def set_sheet_label(self, name: str) -> None:
-        self._sheet_label.config(text=name or "Auto")
+        if dpg.does_item_exist(self._ids["sheet_label"]):
+            dpg.configure_item(
+                self._ids["sheet_label"],
+                default_value=name or "Auto",
+            )
 
     def set_log_path_label(self, path: str) -> None:
-        self._log_label.config(text=self._short(path))
+        if dpg.does_item_exist(self._ids["log_label"]):
+            dpg.configure_item(
+                self._ids["log_label"],
+                default_value=self._short(path),
+            )
 
     def set_chest_types(self, chest_types: list[str]) -> None:
-        """Update the chest type list and populate the manual combo."""
         self._chest_types = chest_types
-        self._manual_combo["values"] = chest_types
-        if chest_types and not self._manual_combo.get():
-            self._manual_combo.set(chest_types[0])
+        tag = self._ids.get("manual_combo")
+        if tag and dpg.does_item_exist(tag):
+            current = dpg.get_value(tag)
+            dpg.configure_item(tag, items=chest_types)
+            if chest_types and not current:
+                dpg.set_value(tag, chest_types[0])
 
     def set_item_prices(self, prices: dict[str, float]) -> None:
-        """Update the price lookup used for log-line colouring."""
         self._item_prices = prices
 
     def get_item_colour(self, item_name: str) -> str:
-        """Map an item name to a log-display colour based on its price."""
         if not self._item_prices:
             return "black"
         price = self._item_prices.get(item_name.strip().lower(), 0)
@@ -185,43 +227,103 @@ class TrackerTab:
         return "gray"
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Helpers
     # ------------------------------------------------------------------
-
-    def _init_colour_tags(self) -> None:
-        colours = {
-            "black": "black",
-            "blue": "blue",
-            "green": "green",
-            "red": "red",
-            "orange": "orange",
-            "gray": "gray",
-            "light_gray": "#AAAAAA",
-            "dark_red": "#8B0000",
-            "purple": "purple",
-        }
-        for tag, fg in colours.items():
-            self._log_display.tag_config(tag, foreground=fg)
 
     @staticmethod
     def _short(path: str) -> str:
+        import os
+
         return os.path.basename(path) if path else "Not selected"
 
     def _manual_btn_pressed(self) -> None:
-        """Fire on_manual with the currently selected chest from the inline combo."""
-        selected = self._manual_combo.get()
-        if not selected:
-            from tkinter import messagebox
-
-            messagebox.showwarning("No Chest Selected", "Select a chest type in the Manual chest dropdown first.")
-            return
-        self._on_manual(selected)
+        tag = self._ids.get("manual_combo")
+        if tag:
+            selected = dpg.get_value(tag)
+            if not selected:
+                _show_modal(
+                    "No Chest Selected",
+                    "Select a chest type in the Manual chest dropdown first.",
+                )
+                return
+            self._on_manual(selected)
 
     def _browse_log(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select Log File",
-            filetypes=[("Log Files", "*.log"), ("Text Files", "*.txt"), ("All Files", "*.*")],
+        def _file_selected(sender, app_data):
+            selections = app_data.get("selections", {})
+            if selections:
+                path = list(selections.values())[0]
+                if dpg.does_item_exist(self._ids["log_label"]):
+                    dpg.configure_item(
+                        self._ids["log_label"],
+                        default_value=self._short(path),
+                    )
+                self._on_log_browse(path)
+            if dpg.does_item_exist("tracker_file_dialog"):
+                dpg.delete_item("tracker_file_dialog")
+
+        if dpg.does_item_exist("tracker_file_dialog"):
+            dpg.delete_item("tracker_file_dialog")
+
+        dpg.add_file_dialog(
+            tag="tracker_file_dialog",
+            label="Select Log File",
+            width=700,
+            height=450,
+            modal=True,
+            callback=_file_selected,
+            cancel_callback=lambda s, a: (
+                dpg.delete_item("tracker_file_dialog") if dpg.does_item_exist("tracker_file_dialog") else None
+            ),
         )
-        if path:
-            self._log_label.config(text=self._short(path))
-            self._on_log_browse(path)
+        dpg.add_file_extension(".log", parent="tracker_file_dialog")
+        dpg.add_file_extension(".txt", parent="tracker_file_dialog")
+        dpg.add_file_extension(".*", parent="tracker_file_dialog")
+
+    def _apply_button_theme(self, tag: int | str, rgb: tuple[int, int, int]) -> None:
+        """Create and bind a colour theme to a button (integer-ID, no alias)."""
+        r, g, b = rgb
+        key = str(tag)
+        # Delete old theme if stored for this button
+        prev = self._btn_themes.get(key)
+        if prev is not None and dpg.does_item_exist(prev):
+            dpg.delete_item(prev)
+        theme_id: int = dpg.add_theme()  # type: ignore[assignment]
+        with dpg.theme_component(dpg.mvButton, parent=theme_id):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (r, g, b, 220))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (r, g, b, 255))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (max(0, r - 30), max(0, g - 30), max(0, b - 30), 255))
+        self._btn_themes[key] = theme_id
+        dpg.bind_item_theme(tag, theme_id)
+
+
+# ---------------------------------------------------------------------------
+# Shared modal helper (module-level so other tabs can use it)
+# ---------------------------------------------------------------------------
+
+_modal_counter = 0
+
+
+def _show_modal(title: str, message: str) -> None:
+    global _modal_counter
+    _modal_counter += 1
+    tag = f"_modal_{_modal_counter}"
+
+    with dpg.window(
+        label=title,
+        modal=True,
+        tag=tag,
+        no_resize=True,
+        width=420,
+        min_size=(320, 120),
+        pos=(300, 250),
+        no_close=False,
+        on_close=lambda: dpg.delete_item(tag) if dpg.does_item_exist(tag) else None,
+    ):
+        dpg.add_text(message, wrap=400)
+        dpg.add_spacer(height=8)
+        dpg.add_button(
+            label="OK",
+            width=80,
+            callback=lambda: dpg.delete_item(tag) if dpg.does_item_exist(tag) else None,
+        )
