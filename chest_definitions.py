@@ -28,9 +28,30 @@ CHEST_DEFINITIONS: list[tuple[str, str, str]] = [
     ("Heroic Chest of Razadere", "Razador (Heroic)", "#922b21"),
     ("Heroic Chest of Nemedere", "Nemere (Heroic)", "#5dade2"),
     ("Heroic Chest of Jatuno", "Jotun Thrym (Heroic)", "#52be80"),
-    ("World Bounty Chest (Normal)", "Bounty (Normal)", "#f39c12"),
+    ("World Bounty Chest (Normal)", "World Bounty (Normal)", "#f39c12"),
+    ("Dungeon Bounty Chest (Normal)", "Dungeon Bounty (Normal)", "#f39c12"),
+    ("Portal Bounty Chest (Normal)", "Portal Bounty (Normal)", "#f1c40f"),
     ("Hardened Bounty Chest (Heroic)", "Bounty (Heroic)", "#f1c40f"),
 ]
+
+# ---------------------------------------------------------------------------
+# Bounty chest groups: maps each pattern-detected bounty chest name to the
+# list of tier options the user can choose from in the override dropdown.
+# Keys must match chest_name values used in PATTERN_CHEST_DEFINITIONS below.
+# Add new bounty tiers here and to CHEST_DEFINITIONS above — no other files
+# need to change.
+# ---------------------------------------------------------------------------
+
+BOUNTY_TIER_GROUPS: dict[str, list[str]] = {
+    "World Bounty Chest (Normal)": [
+        "World Bounty Chest (Normal)",
+        "Dungeon Bounty Chest (Normal)",
+        "Portal Bounty Chest (Normal)",
+    ],
+    "Hardened Bounty Chest (Heroic)": [
+        "Hardened Bounty Chest (Heroic)",
+    ],
+}
 
 # ---------------------------------------------------------------------------
 # Pattern chests: detected by loot signature, not log text
@@ -672,6 +693,68 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
         "Earth Soulstone",
     ],
     "World Bounty Chest (Normal)": [
+        "Shard",
+        "Storm Crystal Shard",
+        "Spirit Emblem Chest",
+        "Aura Emblem Chest",
+        "Magical Smithing Hammer",
+        "Nataraja's Medallion",
+        "Midnight Potion",
+        "Hammer of Althor",
+        "Althor's Cosmic Dust",
+        "Book of Truth",
+        "Bloodred Flower",
+        "Monstrous Feather",
+        "Monstrous Claw",
+        "Magical Dice",
+        "Holy Stone",
+        "Etherplasma",
+        "Emblem Piece",
+        "Emblem Chest",
+        "Skill Book Chest [M-G]",
+        "Companion Serum [50-250]",
+        "Yellow Belt",
+        "Brown Belt",
+        "Orange Yarn",
+        "Black Yarn",
+        "Ice-cold Pass",
+        "Charred Pass",
+        "Grass-covered Pass",
+        "Hellish Pass",
+        "Damned Runestone",
+    ],
+    "Dungeon Bounty Chest (Normal)": [
+        "Shard",
+        "Storm Crystal Shard",
+        "Spirit Emblem Chest",
+        "Aura Emblem Chest",
+        "Magical Smithing Hammer",
+        "Nataraja's Medallion",
+        "Midnight Potion",
+        "Hammer of Althor",
+        "Althor's Cosmic Dust",
+        "Book of Truth",
+        "Bloodred Flower",
+        "Monstrous Feather",
+        "Monstrous Claw",
+        "Magical Dice",
+        "Holy Stone",
+        "Etherplasma",
+        "Emblem Piece",
+        "Emblem Chest",
+        "Skill Book Chest [M-G]",
+        "Companion Serum [50-250]",
+        "Yellow Belt",
+        "Brown Belt",
+        "Orange Yarn",
+        "Black Yarn",
+        "Ice-cold Pass",
+        "Charred Pass",
+        "Grass-covered Pass",
+        "Hellish Pass",
+        "Damned Runestone",
+    ],
+    "Portal Bounty Chest (Normal)": [
         "Shard",
         "Storm Crystal Shard",
         "Spirit Emblem Chest",

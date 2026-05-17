@@ -22,6 +22,7 @@ from constants import (
     CHEST_DISPLAY_NAMES,
     CHEST_COLORS,
     DEFAULT_CHEST_TYPE,
+    BOUNTY_TIER_GROUPS,
 )
 from log_monitor import LogMonitor
 from ui.mini_window import MiniWindow
@@ -29,7 +30,7 @@ from ui.tracker_tab import TrackerTab, _show_modal
 from ui.prices_tab import PricesTab
 import updater
 
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 from ui.viewer_tab import ViewerTab
 
 
@@ -93,8 +94,6 @@ def _load_unicode_font(size: int = 15) -> None:
     """
     Load a system font with full Unicode coverage and bind it globally.
     Falls back silently to DPG's built-in ASCII font if no TTF is found.
-    Covers: Basic Latin + Latin-1 + Latin Extended + general punctuation +
-            arrows + box-drawing characters (covers all symbols used in the app).
     """
     import sys
 
@@ -131,11 +130,33 @@ def _load_unicode_font(size: int = 15) -> None:
     try:
         with dpg.font_registry():
             font = dpg.add_font(font_path, size)
-            # DPG 2.x loads all Unicode ranges automatically -- no add_font_range needed
         dpg.bind_font(font)
         print(f"[font] Loaded Unicode font: {font_path}")
     except Exception as exc:
         print(f"[font] Failed to load {font_path}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Bounty group helpers (module-level, no DPG imports)
+# ---------------------------------------------------------------------------
+
+
+def _is_bounty_chest(chest_name: str) -> bool:
+    """Return True if *chest_name* belongs to any bounty tier group."""
+    for tiers in BOUNTY_TIER_GROUPS.values():
+        if chest_name in tiers:
+            return True
+    return chest_name in BOUNTY_TIER_GROUPS
+
+
+def _bounty_group_key(chest_name: str) -> str | None:
+    """Return the canonical group key for *chest_name*, or None."""
+    if chest_name in BOUNTY_TIER_GROUPS:
+        return chest_name
+    for key, tiers in BOUNTY_TIER_GROUPS.items():
+        if chest_name in tiers:
+            return key
+    return None
 
 
 class App:
@@ -582,20 +603,58 @@ class App:
         _queue(self._update_mini)
 
     def _on_pattern_chest_detected(self, chest_name: str, loot: list[tuple[int, str]]) -> None:
-        self._log_threadsafe(f"[!] {chest_name.upper()} DETECTED (pattern match)!", "blue")
-        if chest_name != self._selected_chest:
-            self._selected_chest = chest_name
-            self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, chest_name)
-            self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_name, {}).items()}
-            _queue(
-                lambda: (
-                    self._tracker.set_item_prices(self._item_prices),
-                    self._viewer.set_selected_chest(chest_name),
-                )
-            )
-            self._mini_avg_revenue = 0.0
-            self._session = _Session()
-        threading.Thread(target=self._write_loot_to_db, args=(loot,), daemon=True).start()
+        """
+        Called by LogMonitor when a pattern-matched chest is found.
+
+        For bounty chests the user may have pre-selected a different tier
+        (e.g. Portal Bounty) via the override dropdown.  We read that
+        selection on the main thread and use it in place of the raw
+        detected name before writing to the DB.
+        """
+        # Determine whether this is a bounty chest that has tier siblings
+        group_key = _bounty_group_key(chest_name)
+        is_bounty = group_key is not None
+
+        def _resolve_and_write(loot=loot):
+            effective_chest = chest_name
+
+            if is_bounty:
+                # Refresh the dropdown options for this specific bounty group
+                self._tracker.update_bounty_override_options(chest_name)
+
+                # Read the user's selected tier (already on main thread here)
+                override = self._tracker.get_bounty_override()
+                if override and group_key and override in BOUNTY_TIER_GROUPS.get(group_key, []):
+                    effective_chest = override
+                    if effective_chest != chest_name:
+                        self._log(
+                            f"[bounty] Override active: recording as '{effective_chest}'",
+                            "orange",
+                        )
+
+            self._log(f"[!] {effective_chest.upper()} DETECTED (pattern match)!", "blue")
+
+            if effective_chest != self._selected_chest:
+                self._selected_chest = effective_chest
+                self._sheet_name = CHEST_DATA_SHEETS.get(effective_chest, effective_chest)
+                self._item_prices = {k.lower(): v for k, v in self._all_prices.get(effective_chest, {}).items()}
+                self._tracker.set_item_prices(self._item_prices)
+                self._viewer.set_selected_chest(effective_chest)
+                self._mini_avg_revenue = 0.0
+                self._session = _Session()
+
+            threading.Thread(
+                target=self._write_loot_to_db,
+                args=(loot, effective_chest),
+                daemon=True,
+            ).start()
+
+            # Reset hint colour after dispatching the write
+            if is_bounty:
+                self._tracker.reset_bounty_override_hint()
+
+        # Pattern callback fires from a background thread; marshal to main thread
+        _queue(_resolve_and_write)
 
     def _on_loot_item(self, qty: int, item: str) -> None:
         colour = self._tracker.get_item_colour(item)
@@ -629,7 +688,24 @@ class App:
             )
         return None
 
-    def _write_loot_to_db(self, loot: list[tuple[int, str]]) -> None:
+    def _write_loot_to_db(
+        self,
+        loot: list[tuple[int, str]],
+        chest_type_override: str | None = None,
+    ) -> None:
+        """
+        Write loot to Supabase.
+
+        Parameters
+        ----------
+        loot               : list of (qty, item_name) tuples
+        chest_type_override: if provided, use this chest type instead of
+                             self._selected_chest (used by pattern detection
+                             after the bounty override has been resolved).
+        """
+        chest_type = chest_type_override if chest_type_override else self._selected_chest
+        item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, self._item_prices).items()}
+
         error = self._validate_loot(loot)
         if error == self._SKIP_SILENT:
             self._log_threadsafe("Skipped direct boss drop (no Shard).", "gray")
@@ -639,9 +715,9 @@ class App:
             return
 
         result = db_handler.write_chest_loot(
-            chest_type=self._selected_chest,
+            chest_type=chest_type,
             loot=loot,
-            item_prices=self._item_prices,
+            item_prices=item_prices,
         )
 
         if not result.success:
@@ -871,7 +947,6 @@ class App:
             self._open_mini()
 
     def _open_mini(self) -> None:
-        # MiniWindow shrinks the viewport, enables always-on-top, hides primary_window
         self._mini = MiniWindow(on_close=self._on_mini_closed)
         self._mini_mode_active = True
         self._tracker.set_mini_active(True)
@@ -879,13 +954,12 @@ class App:
 
     def _close_mini(self) -> None:
         if self._mini:
-            self._mini.close()  # restores viewport size + shows primary_window
+            self._mini.close()
             self._mini = None
         self._mini_mode_active = False
         self._tracker.set_mini_active(False)
 
     def _on_mini_closed(self) -> None:
-        # Called when user clicks X on the HUD -- MiniWindow already restored viewport
         self._mini = None
         self._mini_mode_active = False
         self._tracker.set_mini_active(False)

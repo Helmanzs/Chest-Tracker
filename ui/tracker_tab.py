@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Callable
 import dearpygui.dearpygui as dpg
 
-from constants import PRICE_TIER_HIGH, PRICE_TIER_MID
+from constants import PRICE_TIER_HIGH, PRICE_TIER_MID, BOUNTY_TIER_GROUPS
 
 LogCallback = Callable[[str, str], None]
 
@@ -30,6 +30,10 @@ _COLOURS: dict[str, tuple[int, int, int, int]] = {
 
 # Max lines kept in the log buffer
 _MAX_LOG_LINES = 500
+
+# Collect all bounty chest names that have tier siblings so we can build
+# a flat set for quick "is this a bounty?" checks.
+_ALL_BOUNTY_CHEST_NAMES: frozenset[str] = frozenset(tier for tiers in BOUNTY_TIER_GROUPS.values() for tier in tiers)
 
 
 class TrackerTab:
@@ -83,6 +87,40 @@ class TrackerTab:
                     self._ids["manual_combo"] = dpg.add_combo(
                         items=[], label="", width=300, tag="tracker_manual_combo"
                     )
+
+            dpg.add_spacer(height=4)
+
+            # -- Bounty tier override ---------------------------------
+            # Shown always; dimmed with a note when no bounty is active.
+            # The row collapses to a single collapsing_header so it
+            # doesn't clutter the main layout.
+            with dpg.collapsing_header(label="Bounty Tier Override", default_open=True):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Override tier:", indent=8)
+                    # Populate with the first bounty group's tiers as a
+                    # sensible default; updated dynamically when a bounty
+                    # chest is detected.
+                    _default_tiers = next(iter(BOUNTY_TIER_GROUPS.values()), [])
+                    self._ids["bounty_override_combo"] = dpg.add_combo(
+                        items=_default_tiers,
+                        default_value=_default_tiers[0] if _default_tiers else "",
+                        width=320,
+                        label="",
+                        tag="tracker_bounty_override_combo",
+                    )
+                    dpg.add_spacer(width=8)
+                    self._ids["bounty_override_hint"] = dpg.add_text(
+                        "← select before the next bounty drops",
+                        color=_COLOURS["gray"],
+                    )
+
+                dpg.add_spacer(height=2)
+                dpg.add_text(
+                    "When a bounty chest is auto-detected, loot will be recorded\n"
+                    "under the tier selected above instead of the base type.",
+                    color=(130, 130, 130, 255),
+                    indent=8,
+                )
 
             dpg.add_spacer(height=4)
 
@@ -227,8 +265,77 @@ class TrackerTab:
         return "gray"
 
     # ------------------------------------------------------------------
+    # Bounty override public API
+    # ------------------------------------------------------------------
+
+    def get_bounty_override(self) -> str:
+        """
+        Return the chest type name currently selected in the bounty override
+        dropdown, or an empty string if the widget doesn't exist.
+        """
+        tag = self._ids.get("bounty_override_combo")
+        if tag and dpg.does_item_exist(tag):
+            return dpg.get_value(tag)
+        return ""
+
+    def update_bounty_override_options(self, detected_chest: str) -> None:
+        """
+        Called when a pattern-detected bounty chest is found.
+        Updates the dropdown to show only the tiers relevant to that base
+        chest and highlights the hint text so the user notices it.
+
+        If the detected chest is not a bounty type, this is a no-op.
+        """
+        # Resolve to canonical group key (detected_chest might itself be a
+        # tier name rather than the pattern key, e.g. "Portal Bounty Chest (Normal)")
+        group_key = self._resolve_bounty_group_key(detected_chest)
+        if group_key is None:
+            return
+
+        tiers = BOUNTY_TIER_GROUPS[group_key]
+        tag = self._ids.get("bounty_override_combo")
+        hint = self._ids.get("bounty_override_hint")
+
+        if tag and dpg.does_item_exist(tag):
+            current = dpg.get_value(tag)
+            dpg.configure_item(tag, items=tiers)
+            # Keep current selection if it's still valid, otherwise reset
+            if current not in tiers:
+                dpg.set_value(tag, tiers[0])
+
+        if hint and dpg.does_item_exist(hint):
+            dpg.configure_item(
+                hint,
+                default_value="← bounty detected! confirm tier before it saves",
+                color=_COLOURS["orange"],
+            )
+
+    def reset_bounty_override_hint(self) -> None:
+        """Restore the hint text to its neutral colour after a chest is saved."""
+        hint = self._ids.get("bounty_override_hint")
+        if hint and dpg.does_item_exist(hint):
+            dpg.configure_item(
+                hint,
+                default_value="← select before the next bounty drops",
+                color=_COLOURS["gray"],
+            )
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_bounty_group_key(chest_name: str) -> str | None:
+        """
+        Return the BOUNTY_TIER_GROUPS key that contains *chest_name*,
+        or None if it is not part of any bounty group.
+        """
+        if chest_name in BOUNTY_TIER_GROUPS:
+            return chest_name
+        for key, tiers in BOUNTY_TIER_GROUPS.items():
+            if chest_name in tiers:
+                return key
+        return None
 
     @staticmethod
     def _short(path: str) -> str:

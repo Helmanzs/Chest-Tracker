@@ -5,7 +5,7 @@ Chest-type mappings loaded from chest_definitions.py (static, app-bundled).
 Users do not configure chest types — they are updated with the app.
 """
 
-from chest_definitions import CHEST_DEFINITIONS, PATTERN_CHEST_DEFINITIONS
+from chest_definitions import CHEST_DEFINITIONS, PATTERN_CHEST_DEFINITIONS, BOUNTY_TIER_GROUPS
 
 # ---------------------------------------------------------------------------
 # Build lookup dicts from static definitions
@@ -22,6 +22,12 @@ CHEST_COLORS: dict[str, str] = {name: color for name, _, color in CHEST_DEFINITI
 PATTERN_CHESTS: list[tuple[str, frozenset[str]]] = [
     (name, frozenset(i.lower() for i in items)) for name, items in PATTERN_CHEST_DEFINITIONS
 ]
+
+# ---------------------------------------------------------------------------
+# Bounty tier groups (re-exported for use in UI / app layers)
+# ---------------------------------------------------------------------------
+
+# BOUNTY_TIER_GROUPS: dict[str, list[str]]  -- imported directly above
 
 # ---------------------------------------------------------------------------
 # Other constants
