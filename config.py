@@ -35,7 +35,7 @@ def load(key: str, default: str = "") -> str:
         with CONFIG_FILE.open("r", encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
-                if stripped.startswith("#") or stripped.startswith("["):
+                if not stripped or stripped.startswith("#"):
                     continue
                 if "=" in stripped:
                     k, _, v = stripped.partition("=")
@@ -55,9 +55,9 @@ def save(values: dict[str, str]) -> None:
             with CONFIG_FILE.open("r", encoding="utf-8") as fh:
                 for line in fh:
                     stripped = line.strip()
-                    if stripped.startswith("#") or stripped.startswith("["):
+                    if not stripped or stripped.startswith("#"):
                         continue
-                    if "=" in stripped and not stripped.startswith("#"):
+                    if "=" in stripped:
                         k, _, v = stripped.partition("=")
                         existing[k.strip()] = v.strip()
         except OSError as exc:
@@ -71,25 +71,6 @@ def save(values: dict[str, str]) -> None:
                 fh.write(f"{k}={v}\n")
     except OSError as exc:
         print(f"[config] write error: {exc}")
-
-
-def load_all() -> dict[str, str]:
-    """Return all key=value pairs from the config file."""
-    result: dict[str, str] = {}
-    if not CONFIG_FILE.exists():
-        return result
-    try:
-        with CONFIG_FILE.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped.startswith("#") or stripped.startswith("["):
-                    continue
-                if "=" in stripped:
-                    k, _, v = stripped.partition("=")
-                    result[k.strip()] = v.strip()
-    except OSError as exc:
-        print(f"[config] load_all error: {exc}")
-    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

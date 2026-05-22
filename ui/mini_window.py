@@ -5,7 +5,7 @@ Mini HUD: shrinks the DPG viewport to a narrow strip, removes the OS title
 bar decoration, and pins the window always-on-top.
 
 On open:
-  - saves current viewport size, position, decoration state
+  - saves current viewport size and position
   - removes title bar (set_viewport_decorated(False))
   - resizes to HUD dimensions
   - sets always-on-top
@@ -35,15 +35,15 @@ class MiniWindow:
         self._alive = False
         self._hud_tag = "mini_hud_content"
 
-        # Save everything we will change
+        # Save viewport dimensions so we can restore them on close
         self._saved_w = dpg.get_viewport_width()
         self._saved_h = dpg.get_viewport_height()
-        self._saved_decorated = dpg.is_viewport_decorated()
 
-        self._dot_id: int | str = 0
-        self._status_id: int | str = 0
-        self._item_id: int | str = 0
-        self._rev_id: int | str = 0
+        # Widget ID sentinels — populated in _build
+        self._dot_id: int | str | None = None
+        self._status_id: int | str | None = None
+        self._item_id: int | str | None = None
+        self._rev_id: int | str | None = None
 
         self._build()
 
@@ -56,9 +56,7 @@ class MiniWindow:
             dpg.delete_item(self._hud_tag)
 
         # ── Shrink OS window ────────────────────────────────────────
-        # Remove title bar so the strip has no wasted chrome
         dpg.set_viewport_decorated(False)
-        # Allow the viewport to be as small as the HUD
         dpg.set_viewport_min_width(100)
         dpg.set_viewport_min_height(_HUD_H)
         dpg.set_viewport_width(_HUD_W)
@@ -115,7 +113,6 @@ class MiniWindow:
                     label="X",
                     width=20,
                     height=20,
-                    user_data=None,
                     callback=self._on_close_btn,
                 )
                 with dpg.theme() as _cb:
@@ -125,7 +122,6 @@ class MiniWindow:
                         dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (210, 40, 40, 255))
                 dpg.bind_item_theme(close_btn, _cb)
 
-        # Hide the main tab UI so only the HUD shows
         dpg.hide_item("primary_window")
         self._alive = True
 
@@ -144,20 +140,20 @@ class MiniWindow:
         try:
             colour = (46, 204, 113, 255) if is_running else (149, 165, 166, 255)
             label = "LIVE" if is_running else "READY"
-            if dpg.does_item_exist(self._dot_id):
+            if self._dot_id is not None and dpg.does_item_exist(self._dot_id):
                 dpg.configure_item(self._dot_id, color=colour)
-            if dpg.does_item_exist(self._status_id):
+            if self._status_id is not None and dpg.does_item_exist(self._status_id):
                 dpg.configure_item(self._status_id, default_value=label, color=colour)
 
             item_name, item_value = most_expensive
-            if dpg.does_item_exist(self._item_id):
+            if self._item_id is not None and dpg.does_item_exist(self._item_id):
                 if item_value > 0:
                     display = (item_name[:24] + "...") if len(item_name) > 27 else item_name
                     dpg.configure_item(self._item_id, default_value=display)
                 else:
                     dpg.configure_item(self._item_id, default_value="-")
 
-            if dpg.does_item_exist(self._rev_id):
+            if self._rev_id is not None and dpg.does_item_exist(self._rev_id):
                 text = f"{avg_revenue:,.0f}".replace(",", " ") if avg_revenue > 0 else "N/A"
                 dpg.configure_item(self._rev_id, default_value=text)
 
@@ -189,7 +185,7 @@ class MiniWindow:
     def _restore(self) -> None:
         """Restore viewport to pre-mini state."""
         dpg.set_viewport_always_top(False)
-        dpg.set_viewport_decorated(self._saved_decorated)
+        dpg.set_viewport_decorated(True)
         dpg.set_viewport_min_width(800)
         dpg.set_viewport_min_height(600)
         dpg.set_viewport_width(self._saved_w)

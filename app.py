@@ -2,7 +2,6 @@
 app.py  (Dear PyGui port)
 --------------------------
 Central application class.  All state + wiring.
-Replaces tkinter App with a Dear PyGui render-loop version.
 """
 
 from __future__ import annotations
@@ -20,18 +19,18 @@ import excel_handler
 from constants import (
     CHEST_DATA_SHEETS,
     CHEST_DISPLAY_NAMES,
-    CHEST_COLORS,
     DEFAULT_CHEST_TYPE,
     BOUNTY_TIER_GROUPS,
+    LOOT_TIMEOUT,
 )
 from log_monitor import LogMonitor
 from ui.mini_window import MiniWindow
 from ui.tracker_tab import TrackerTab, _show_modal
 from ui.prices_tab import PricesTab
+from ui.viewer_tab import ViewerTab
 import updater
 
-APP_VERSION = "1.0.13"
-from ui.viewer_tab import ViewerTab
+APP_VERSION = "1.0.14"
 
 
 @dataclass
@@ -68,7 +67,7 @@ def _make_tray_icon_image(size: int = 64):  # type: ignore[return]
     return img
 
 
-# Global callback queue: (fn,) tuples executed on the main DPG thread
+# Global callback queue: fn tuples executed on the main DPG thread
 _CALLBACK_QUEUE: list = []
 _QUEUE_LOCK = threading.Lock()
 
@@ -111,7 +110,7 @@ def _load_unicode_font(size: int = 15) -> None:
             "/Library/Fonts/Arial.ttf",
             "/System/Library/Fonts/SFNSText.ttf",
         ]
-    else:  # Linux
+    else:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -119,8 +118,6 @@ def _load_unicode_font(size: int = 15) -> None:
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
         ]
-
-    import os
 
     font_path = next((p for p in candidates if os.path.isfile(p)), None)
     if font_path is None:
@@ -141,16 +138,8 @@ def _load_unicode_font(size: int = 15) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _is_bounty_chest(chest_name: str) -> bool:
-    """Return True if *chest_name* belongs to any bounty tier group."""
-    for tiers in BOUNTY_TIER_GROUPS.values():
-        if chest_name in tiers:
-            return True
-    return chest_name in BOUNTY_TIER_GROUPS
-
-
 def _bounty_group_key(chest_name: str) -> str | None:
-    """Return the canonical group key for *chest_name*, or None."""
+    """Return the canonical BOUNTY_TIER_GROUPS key for *chest_name*, or None."""
     if chest_name in BOUNTY_TIER_GROUPS:
         return chest_name
     for key, tiers in BOUNTY_TIER_GROUPS.items():
@@ -166,7 +155,6 @@ class App:
         # -- Persisted settings ---------------------------------------
         self._log_path: str = config.load("log_path")
         self._selected_chest: str = config.load("chest_type") or DEFAULT_CHEST_TYPE
-        self._sheet_name: str = CHEST_DATA_SHEETS.get(self._selected_chest, "")
 
         # -- Runtime state --------------------------------------------
         self._item_prices: dict[str, float] = {}
@@ -175,7 +163,6 @@ class App:
         self._db_connected: bool = False
 
         self._last_most_expensive: tuple[str, float] = ("-", 0.0)
-        self._avg_revenue: float = 0.0
         self._mini_avg_revenue: float = 0.0
 
         self._monitor: LogMonitor | None = None
@@ -249,7 +236,6 @@ class App:
                 with dpg.tab(label=" Prices ") as tab_prices:
                     pass
 
-        # Instantiate tab classes (they append widgets into their parent tabs)
         self._tracker = TrackerTab(
             parent_tag=tab_tracker,
             on_start_stop=self._toggle_service,
@@ -283,11 +269,9 @@ class App:
 
     def run(self) -> None:
         """Start the DPG render loop and run startup logic."""
-        # Startup in background after first frame
         threading.Thread(target=self._startup, daemon=True).start()
 
         while dpg.is_dearpygui_running():
-            # Resize primary window to match viewport
             vw = dpg.get_viewport_width()
             vh = dpg.get_viewport_height()
             dpg.configure_item("primary_window", width=vw, height=vh)
@@ -359,7 +343,6 @@ class App:
         self._refresh_db_view()
         self._tracker.set_chest_types(list(CHEST_DATA_SHEETS.keys()))
         if self._db_connected:
-            # Show spinners on all cards immediately before the DB fetch starts
             self._prices_tab.set_loading(list(CHEST_DATA_SHEETS.keys()))
             threading.Thread(target=self._startup_drop_rates, daemon=True).start()
 
@@ -502,7 +485,6 @@ class App:
         self._monitor = LogMonitor(
             log_path=self._log_path,
             chest_types=CHEST_DATA_SHEETS,
-            selected_chest=self._selected_chest,
             on_chest_detected=self._on_chest_detected,
             on_loot_item=self._on_loot_item,
             on_log=self._log_threadsafe,
@@ -532,15 +514,13 @@ class App:
             return
         if not self._item_prices or self._selected_chest != chest_type:
             self._selected_chest = chest_type
-            self._sheet_name = CHEST_DATA_SHEETS.get(chest_type, "")
             self._load_prices()
-            self._tracker.set_sheet_label(self._sheet_name)
+            self._tracker.set_sheet_label(CHEST_DATA_SHEETS.get(chest_type, ""))
 
         if self._monitor is None:
             self._monitor = LogMonitor(
                 log_path=self._log_path or "",
                 chest_types=CHEST_DATA_SHEETS,
-                selected_chest=chest_type,
                 on_chest_detected=self._on_chest_detected,
                 on_loot_item=self._on_loot_item,
                 on_log=self._log_threadsafe,
@@ -556,7 +536,6 @@ class App:
 
     def _manual_timeout_loop(self) -> None:
         import time
-        from constants import LOOT_TIMEOUT
 
         assert self._monitor is not None
         while self._monitor._awaiting_loot:
@@ -575,7 +554,8 @@ class App:
     # ------------------------------------------------------------------
 
     def _on_chest_detected(self, chest_name: str) -> None:
-        assert self._monitor is not None
+        if self._monitor is None:
+            return
         pending = self._monitor.finalize()
         if pending:
             self._log_threadsafe("Saving previous chest data...", "orange")
@@ -583,12 +563,11 @@ class App:
 
         if chest_name != self._selected_chest:
             self._selected_chest = chest_name
-            self._sheet_name = CHEST_DATA_SHEETS.get(chest_name, "")
             self._item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_name, {}).items()}
 
             def _sync_ui():
                 self._tracker.set_item_prices(self._item_prices)
-                self._tracker.set_sheet_label(self._sheet_name)
+                self._tracker.set_sheet_label(CHEST_DATA_SHEETS.get(chest_name, ""))
                 self._viewer.set_selected_chest(chest_name)
 
             _queue(_sync_ui)
@@ -596,7 +575,7 @@ class App:
             self._session = _Session()
             self._save_config()
 
-        self._monitor.start_new_chest(chest_name)
+        self._monitor.start_new_chest()
         self._log_threadsafe("\n" + "=" * 50, "blue")
         self._log_threadsafe(f"[!] {chest_name.upper()} DETECTED! Waiting for loot...", "blue")
         self._log_threadsafe("=" * 50, "blue")
@@ -611,20 +590,22 @@ class App:
         selection on the main thread and use it in place of the raw
         detected name before writing to the DB.
         """
-        # Determine whether this is a bounty chest that has tier siblings
         group_key = _bounty_group_key(chest_name)
         is_bounty = group_key is not None
+
+        # Build a flat set of every valid bounty tier name for the override check.
+        _all_bounty_tiers: frozenset[str] = frozenset(t for tiers in BOUNTY_TIER_GROUPS.values() for t in tiers)
 
         def _resolve_and_write(loot=loot):
             effective_chest = chest_name
 
             if is_bounty:
-                # Refresh the dropdown options for this specific bounty group
                 self._tracker.update_bounty_override_options(chest_name)
 
-                # Read the user's selected tier (already on main thread here)
                 override = self._tracker.get_bounty_override()
-                if override and group_key and override in BOUNTY_TIER_GROUPS.get(group_key, []):
+                # Accept any valid tier — user may intentionally cross-select
+                # (e.g. override a detected Normal bounty to record as Heroic).
+                if override and override in _all_bounty_tiers:
                     effective_chest = override
                     if effective_chest != chest_name:
                         self._log(
@@ -636,7 +617,6 @@ class App:
 
             if effective_chest != self._selected_chest:
                 self._selected_chest = effective_chest
-                self._sheet_name = CHEST_DATA_SHEETS.get(effective_chest, effective_chest)
                 self._item_prices = {k.lower(): v for k, v in self._all_prices.get(effective_chest, {}).items()}
                 self._tracker.set_item_prices(self._item_prices)
                 self._viewer.set_selected_chest(effective_chest)
@@ -649,11 +629,9 @@ class App:
                 daemon=True,
             ).start()
 
-            # Reset hint colour after dispatching the write
             if is_bounty:
                 self._tracker.reset_bounty_override_hint()
 
-        # Pattern callback fires from a background thread; marshal to main thread
         _queue(_resolve_and_write)
 
     def _on_loot_item(self, qty: int, item: str) -> None:
@@ -662,7 +640,8 @@ class App:
         _queue(self._update_mini)
 
     def _on_loot_timeout(self) -> None:
-        assert self._monitor is not None
+        if self._monitor is None:
+            return
         loot = self._monitor.finalize()
         if not loot:
             self._log_threadsafe("No loot to save.", "gray")
@@ -674,9 +653,8 @@ class App:
     # DB writing
     # ------------------------------------------------------------------
 
-    _SKIP_SILENT = "__skip_silent__"
-
     def _validate_loot(self, loot: list[tuple[int, str]]) -> str | None:
+        """Return an error message if loot looks invalid, or None if OK."""
         shard_qty = next((qty for qty, item in loot if item.strip().lower() == "shard"), None)
         if shard_qty is None or shard_qty == 0:
             return "Shard quantity is 0 -- chest data looks incomplete. Not saved."
@@ -707,9 +685,6 @@ class App:
         item_prices = {k.lower(): v for k, v in self._all_prices.get(chest_type, self._item_prices).items()}
 
         error = self._validate_loot(loot)
-        if error == self._SKIP_SILENT:
-            self._log_threadsafe("Skipped direct boss drop (no Shard).", "gray")
-            return
         if error:
             self._log_threadsafe(f"! Validation failed: {error}", "red")
             return
@@ -746,7 +721,6 @@ class App:
         self._session.total_revenue += result.chest_revenue
         self._session.chest_count += 1
         self._mini_avg_revenue = self._session.avg_revenue
-        self._avg_revenue = self._session.avg_revenue
         self._last_most_expensive = result.most_expensive_item
 
         _queue(self._update_mini)
@@ -777,8 +751,6 @@ class App:
             else:
                 session_stats = total_stats
                 loot_rows = db_handler.fetch_all_loot(chest_type)
-
-            self._avg_revenue = session_stats.avg_revenue_per_chest
 
             def _apply(s=session_stats, t=total_stats, l=loot_rows, ip=item_prices_lower):
                 self._apply_db_view(s, t, l, ip)
@@ -974,7 +946,8 @@ class App:
             )
 
     # ------------------------------------------------------------------
-    # Tray (optional)
+    # Tray (optional — call _start_tray_icon() from run() to enable)
+    # TODO: wire up if system-tray support is desired in a future release.
     # ------------------------------------------------------------------
 
     def _start_tray_icon(self) -> None:

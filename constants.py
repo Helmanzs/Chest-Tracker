@@ -34,7 +34,6 @@ PATTERN_CHESTS: list[tuple[str, frozenset[str]]] = [
 # ---------------------------------------------------------------------------
 
 IGNORED_ITEMS: set[str] = {"yang"}
-NON_ITEM_COLUMNS: set[str] = {"#", "chest #", "chest", "date", "time", "timestamp"}
 DEFAULT_CHEST_TYPE: str = next(iter(CHEST_DATA_SHEETS), "")
 LOOT_TIMEOUT: float = 2.0
 PRICE_TIER_HIGH: int = 700_000

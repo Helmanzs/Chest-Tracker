@@ -30,6 +30,7 @@ PatternCallback = Callable[[str, list[tuple[int, str]]], None]  # (chest_name, l
 
 # Items that can drop directly from a boss without opening a chest.
 # A loot batch containing ONLY these items (no Shard) is a boss drop, not a chest.
+# Note: compared case-insensitively via .lower() so capitalisation doesn't matter.
 _DIRECT_DROP_ITEMS: frozenset[str] = frozenset(
     {
         "dexterity of the smith (chest)",
@@ -51,7 +52,6 @@ class LogMonitor:
         self,
         log_path: str,
         chest_types: dict[str, str],
-        selected_chest: str,
         on_chest_detected: ChestCallback,
         on_loot_item: LootCallback,
         on_log: LogCallback,
@@ -61,7 +61,6 @@ class LogMonitor:
     ) -> None:
         self.log_path = log_path
         self.chest_types = chest_types
-        self.selected_chest = selected_chest
         self.loot_timeout = loot_timeout
 
         self._on_chest_detected = on_chest_detected
@@ -113,7 +112,7 @@ class LogMonitor:
     def stop(self) -> None:
         self._running = False
 
-    def start_new_chest(self, chest_name: str) -> None:
+    def start_new_chest(self) -> None:
         self._awaiting_loot = True
         self._target_timestamp = None
         self._captured_loot = []

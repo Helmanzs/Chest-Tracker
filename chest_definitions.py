@@ -30,16 +30,18 @@ CHEST_DEFINITIONS: list[tuple[str, str, str]] = [
     ("Heroic Chest of Jatuno", "Jotun Thrym (Heroic)", "#52be80"),
     ("World Bounty Chest (Normal)", "World Bounty (Normal)", "#f39c12"),
     ("Dungeon Bounty Chest (Normal)", "Dungeon Bounty (Normal)", "#f39c12"),
-    ("Portal Bounty Chest (Normal)", "Portal Bounty (Normal)", "#f1c40f"),
+    ("Portal Bounty Chest (Normal)", "Portal Bounty (Normal)", "#f39c12"),
     ("Hardened Bounty Chest (Heroic)", "Bounty (Heroic)", "#f1c40f"),
 ]
 
 # ---------------------------------------------------------------------------
 # Bounty chest groups: maps each pattern-detected bounty chest name to the
 # list of tier options the user can choose from in the override dropdown.
-# Keys must match chest_name values used in PATTERN_CHEST_DEFINITIONS below.
-# Add new bounty tiers here and to CHEST_DEFINITIONS above — no other files
-# need to change.
+#
+# Convention: every key here MUST match a chest_name in PATTERN_CHEST_DEFINITIONS
+# below so that _bounty_group_key() can resolve detected names correctly.
+# When adding a new bounty tier: add to CHEST_DEFINITIONS, PATTERN_CHEST_DEFINITIONS
+# (if pattern-detected), and the appropriate entry here. No other files need to change.
 # ---------------------------------------------------------------------------
 
 BOUNTY_TIER_GROUPS: dict[str, list[str]] = {
@@ -757,6 +759,7 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
     "Portal Bounty Chest (Normal)": [
         "Shard",
         "Storm Crystal Shard",
+        "Portal Shard",
         "Spirit Emblem Chest",
         "Aura Emblem Chest",
         "Magical Smithing Hammer",

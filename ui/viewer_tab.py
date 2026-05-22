@@ -13,6 +13,7 @@ import pandas as pd
 
 import db_handler
 
+# Columns always shown first, regardless of price, in the order listed here.
 PINNED_COLUMNS = ["#", "chest_id", "recorded_at", "Shard", "Energy Fragment"]
 
 # Table row alternating colours (RGBA)
@@ -47,8 +48,6 @@ class ViewerTab:
         self._session_mode = False
 
         self._ids: dict[str, int | str] = {}
-        self._current_columns: list[str] = []
-        self._table_row_count = 0
 
         self._build()
 
@@ -87,7 +86,6 @@ class ViewerTab:
                     label="Export to Excel",
                     callback=self._on_export,
                 )
-                # Green theme for export button
                 with dpg.theme() as exp_theme:
                     with dpg.theme_component(dpg.mvButton):
                         dpg.add_theme_color(dpg.mvThemeCol_Button, (39, 174, 96, 220))
@@ -160,8 +158,6 @@ class ViewerTab:
         # Clear existing table
         if dpg.does_item_exist("viewer_data_table"):
             dpg.delete_item("viewer_data_table")
-        self._current_columns = []
-        self._table_row_count = 0
 
         if df.empty:
             with dpg.group(parent=container, tag="_viewer_empty_msg"):
@@ -169,13 +165,11 @@ class ViewerTab:
                 dpg.add_text("No data yet -- start tracking chests!", color=(160, 160, 160, 255))
             return
 
-        # Remove stale empty msg
         if dpg.does_item_exist("_viewer_empty_msg"):
             dpg.delete_item("_viewer_empty_msg")
 
         cols = self._sort_columns(list(df.columns), item_prices or {})
         df = df[cols]
-        self._current_columns = cols
 
         with dpg.table(
             tag="viewer_data_table",
@@ -203,11 +197,8 @@ class ViewerTab:
                 with dpg.table_row():
                     for val in row:
                         dpg.add_text(str(val) if val != 0 else "")
-                # Alternating row colour
                 colour = _ROW_EVEN if i % 2 == 0 else _ROW_ODD
                 dpg.highlight_table_row("viewer_data_table", i, colour)
-
-            self._table_row_count = len(df)
 
     def show_stats(
         self,
@@ -242,10 +233,6 @@ class ViewerTab:
             total_text += f" ({self._fmt(t.total_revenue)})"
         self._set_text("total_rev", total_text)
 
-    def show_stats_error(self) -> None:
-        for key in ("total_chests", "rev_per_chest", "total_rev"):
-            self._set_text(key, "Error")
-
     def is_session_mode(self) -> bool:
         return self._session_mode
 
@@ -268,6 +255,10 @@ class ViewerTab:
 
     @staticmethod
     def _sort_columns(cols: list[str], item_prices: dict[str, float]) -> list[str]:
+        """
+        Returns columns with PINNED_COLUMNS first (in pinned order),
+        then remaining columns sorted by descending item price.
+        """
         pinned = [c for c in PINNED_COLUMNS if c in cols]
         unpinned = [c for c in cols if c not in pinned]
         unpinned.sort(key=lambda c: -item_prices.get(c.lower(), 0.0))

@@ -31,31 +31,23 @@ from constants import CHEST_COLORS, CHEST_DISPLAY_NAMES
 # Layout constants  (all in pixels)
 # ---------------------------------------------------------------------------
 
-# Column widths inside every row table
 _W_STRIPE = 8
 _W_NAME = 178
 _W_DROP = 66
 _W_AVG = 54
 _W_PRICE = 114
 
-# Total inner content width: stripe_col + gap + name + drop + avg + price
 _INNER_W = (_W_STRIPE + 8) + _W_NAME + _W_DROP + _W_AVG + _W_PRICE  # = 428
+_CARD_W = _INNER_W + 20  # = 448
 
-# Card width: inner + left/right padding + border
-_CARD_W = _INNER_W + 20  # = 448  -- no horizontal scroll needed
-
-# Fixed card sub-heights
-_HDR_H = 56  # coloured header band
-_AVG_H = 22  # avg revenue line
-_HEAD_H = 22  # column headings row
-_ROW_H = 22  # each item row
-_ROWS_CNT = 20  # visible rows before item list scrolls
+_HDR_H = 56
+_AVG_H = 22
+_HEAD_H = 22
+_ROW_H = 22
+_ROWS_CNT = 20
 _ROWS_H = _ROW_H * _ROWS_CNT
-
-# Total fixed card height
 _CARD_H = _HDR_H + _AVG_H + 4 + _HEAD_H + 4 + _ROWS_H + 16
-
-_CARD_GAP = 10  # horizontal gap between cards
+_CARD_GAP = 10
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -68,9 +60,8 @@ _ROW_EVEN = (48, 48, 54, 255)
 _ROW_ODD = (40, 40, 46, 255)
 _COL_HDR_FG = (190, 190, 190, 255)
 
-# Module-level font IDs (populated by _ensure_fonts on first use)
-_font_normal: int = 0
-_font_large: int = 0  # used for card header name
+# Module-level font ID (populated by _ensure_fonts on first use)
+_font_large: int = 0
 
 
 def _ensure_fonts() -> None:
@@ -232,7 +223,6 @@ class PricesTab:
         self._ids: dict[str, int | str] = {}
         self._hdr_themes: dict[str, int] = {}
         self._btn_themes: dict[str, int] = {}
-        # Chests currently fetching from DB -- spinner shown in their header
         self._loading_chests: set[str] = set()
 
         _ensure_fonts()
@@ -275,9 +265,6 @@ class PricesTab:
             dpg.add_separator()
             dpg.add_spacer(height=4)
 
-            # Card area height = card height + horizontal scrollbar (~20px)
-            # Using -1 makes the window fill the entire remaining space and
-            # pushes the scrollbar off the bottom edge of the viewport.
             self._ids["card_area"] = dpg.add_child_window(
                 width=-1,
                 height=_CARD_H + 22,
@@ -313,8 +300,6 @@ class PricesTab:
         if not self._chest_types:
             return
 
-        # group(horizontal=True) is the correct DPG way to place
-        # child_windows side-by-side with reliable explicit dimensions.
         with dpg.group(parent=area, horizontal=True):
             for ct in self._chest_types:
                 self._build_card(ct)
@@ -334,13 +319,7 @@ class PricesTab:
         if hdr_key not in self._btn_themes:
             self._btn_themes[hdr_key] = _make_btn_theme(rgb, text_col)
 
-        # Outer card -- fixed width and height, no scroll
-        with dpg.child_window(
-            width=_CARD_W,
-            height=_CARD_H,
-            border=True,
-            no_scrollbar=True,
-        ):
+        with dpg.child_window(width=_CARD_W, height=_CARD_H, border=True, no_scrollbar=True):
             # --- Coloured header band ---
             hdr_win = dpg.add_child_window(
                 width=_CARD_W - 4,
@@ -350,12 +329,8 @@ class PricesTab:
             )
             dpg.bind_item_theme(hdr_win, self._hdr_themes[hdr_key])
 
-            # Use a 2-column table to guarantee identical alignment on every card:
-            #   col 0 (stretch): chest name
-            #   col 1 (fixed):   Refresh button
-            # Top/bottom padding handled by outer group spacers.
             _btn_w = 80
-            _txt_col_w = _CARD_W - 4 - _btn_w - 4  # card - border - btn - right gap
+            _txt_col_w = _CARD_W - 4 - _btn_w - 4
 
             with dpg.group(parent=hdr_win):
                 dpg.add_spacer(height=12)
@@ -376,13 +351,11 @@ class PricesTab:
                     init_width_or_weight=float(_btn_w),
                 )
                 with dpg.table_row(parent=hdr_tbl):
-                    # Name cell: left-pad + text
                     with dpg.group(horizontal=True):
                         dpg.add_spacer(width=10)
                         lbl = dpg.add_text(short, color=text_col)
                         if _font_large:
                             dpg.bind_item_font(lbl, _font_large)
-                    # Button cell: fixed width, always right-aligned
                     ref_btn = dpg.add_button(
                         label="Refresh",
                         width=_btn_w,
@@ -395,7 +368,7 @@ class PricesTab:
             # --- Avg revenue line (with inline spinner when loading) ---
             stats = self._chest_stats.get(chest_type)
             if stats and stats.avg_revenue_per_chest > 0:
-                avg_text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}" f"  |  {stats.total_chests} chests"
+                avg_text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}  |  {stats.total_chests} chests"
             else:
                 avg_text = "avg: --"
             with dpg.group(horizontal=True):
@@ -420,13 +393,8 @@ class PricesTab:
             self._build_heading_row()
             dpg.add_separator()
 
-            # --- Scrollable item list (fills remaining card height) ---
-            with dpg.child_window(
-                width=_CARD_W - 4,
-                height=-1,
-                border=False,
-                no_scrollbar=False,
-            ):
+            # --- Scrollable item list ---
+            with dpg.child_window(width=_CARD_W - 4, height=-1, border=False, no_scrollbar=False):
                 pinned, specific, shared = self._sorted_groups(chest_type)
                 dr = self._drop_rates.get(chest_type, {})
                 aq = self._avg_qty.get(chest_type, {})
@@ -529,9 +497,6 @@ class PricesTab:
                 no_tooltip=True,
                 enabled=False,
             )
-            # Item name with right-click popup for pin/unpin
-            # Use user_data to pass context reliably -- lambda defaults are
-            # overridden by DPG's positional user_data=None arg.
             name_lbl = dpg.add_text(item_name[:26], color=fg)
             with dpg.popup(parent=name_lbl, mousebutton=dpg.mvMouseButton_Right):
                 pinned_now = item_name.lower() in [p.lower() for p in self._pinned.get(chest_type, [])]
@@ -558,24 +523,19 @@ class PricesTab:
                 width=_W_PRICE - 4,
                 label="",
                 user_data=(chest_type, item_name),
-                callback=self._on_price_change,  # fires on every keystroke
+                callback=self._on_price_change,
             )
-            # Attach focus-in / focus-out handlers for highlight + format
             with dpg.item_handler_registry() as _reg:
-                dpg.add_item_activated_handler(  # focus-in: highlight siblings
+                dpg.add_item_activated_handler(
                     user_data=(chest_type, item_name),
                     callback=self._on_price_focus_in,
                 )
-                dpg.add_item_deactivated_handler(  # focus-out: format + clear highlight
+                dpg.add_item_deactivated_handler(
                     user_data=(chest_type, item_name, inp_tag),
                     callback=self._on_price_focus_out,
                 )
             dpg.bind_item_handler_registry(inp_tag, _reg)
         dpg.highlight_table_row(tbl, 0, row_bg)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Pin / unpin
@@ -628,16 +588,15 @@ class PricesTab:
         return f"pi_{_s(chest_type)[:18]}_{_s(item_name)[:28]}"
 
     # ------------------------------------------------------------------
-    # DPG callbacks (use user_data to pass context -- reliable, no lambda issues)
+    # DPG callbacks
     # ------------------------------------------------------------------
 
     def _on_price_change(self, sender: int, app_data: str, user_data: object) -> None:
-        """Fires on every keystroke -- syncs raw value to sibling fields immediately."""
+        """Fires on every keystroke — syncs raw value to sibling fields immediately."""
         if not isinstance(user_data, tuple) or len(user_data) != 2:
             return
         chest_type, item_name = user_data
         raw = dpg.get_value(sender)
-        # Sync raw text to sibling fields so user sees live update
         name_lower = item_name.lower()
         for other_ct, other_vars in self._vars.items():
             if other_ct == chest_type:
@@ -649,7 +608,7 @@ class PricesTab:
                         dpg.set_value(other_tag, raw)
 
     def _on_price_focus_in(self, sender: int, app_data: object, user_data: object) -> None:
-        """Fires when a price field gains focus -- highlight all sibling fields."""
+        """Fires when a price field gains focus — highlight all sibling fields."""
         if not isinstance(user_data, tuple) or len(user_data) != 2:
             return
         chest_type, item_name = user_data
@@ -657,14 +616,12 @@ class PricesTab:
         self._set_field_highlight(sibling_tags, active=True)
 
     def _on_price_focus_out(self, sender: int, app_data: object, user_data: object) -> None:
-        """Fires when a price field loses focus -- format value and clear highlight."""
+        """Fires when a price field loses focus — format value and clear highlight."""
         if not isinstance(user_data, tuple) or len(user_data) != 3:
             return
         chest_type, item_name, inp_tag = user_data
-        # Format + commit the final value
         if dpg.does_item_exist(inp_tag):
             self._commit(chest_type, item_name, inp_tag)
-        # Clear sibling highlight
         sibling_tags = self._sibling_tags(chest_type, item_name)
         self._set_field_highlight(sibling_tags, active=False)
 
@@ -683,11 +640,8 @@ class PricesTab:
         return tags
 
     def _set_field_highlight(self, tags: list[str], active: bool) -> None:
-        """Apply or remove a yellow highlight theme on the given input fields."""
-        if active:
-            colour = (90, 80, 30, 255)  # amber tint = "related field"
-        else:
-            colour = (50, 50, 58, 255)  # matches global FrameBg
+        """Apply or remove an amber highlight theme on the given input fields."""
+        colour = (90, 80, 30, 255) if active else (50, 50, 58, 255)
         for t in tags:
             if dpg.does_item_exist(t):
                 th: int = dpg.add_theme()  # type: ignore[assignment]
@@ -696,7 +650,6 @@ class PricesTab:
                 dpg.bind_item_theme(t, th)
 
     def _on_pin_click(self, sender: int, app_data: object, user_data: object) -> None:
-        """Called by DPG when user clicks a pin/unpin menu item."""
         if not isinstance(user_data, tuple) or len(user_data) != 2:
             return
         chest_type, item_name = user_data
@@ -717,7 +670,6 @@ class PricesTab:
         self._vars[chest_type][item_name] = formatted
 
         name_lower = item_name.lower()
-        synced_tags: list[str] = []
         synced_to: list[str] = []
 
         for other_ct, other_vars in self._vars.items():
@@ -729,7 +681,6 @@ class PricesTab:
                     other_tag = self._tag_for(other_ct, existing_name)
                     if dpg.does_item_exist(other_tag):
                         dpg.set_value(other_tag, formatted)
-                        synced_tags.append(other_tag)
                     _, short = _chest_display(other_ct)
                     synced_to.append(short)
 
@@ -786,14 +737,13 @@ class PricesTab:
     # ------------------------------------------------------------------
 
     def _on_refresh_click(self, sender: int, app_data: object, user_data: object) -> None:
-        """DPG button callback -- user_data is the chest_type string."""
         if isinstance(user_data, str):
             self._refresh_single_chest(user_data)
 
     def _refresh_single_chest(self, chest_type: str) -> None:
         _, short = _chest_display(chest_type)
         self._loading_chests.add(chest_type)
-        self._render_cards()  # re-render immediately to show spinner
+        self._render_cards()
         sync = self._ids.get("sync_label")
         if sync and dpg.does_item_exist(sync):
             dpg.configure_item(sync, default_value=f"Refreshing {short}...")
@@ -808,7 +758,7 @@ class PricesTab:
         self._drop_rates[chest_type] = rates
         self._avg_qty[chest_type] = avgs
         self._chest_stats[chest_type] = stats
-        self._loading_chests.discard(chest_type)  # remove spinner
+        self._loading_chests.discard(chest_type)
         dpg.split_frame()
         self._render_cards()
         self._update_avg_label(chest_type)
@@ -829,7 +779,7 @@ class PricesTab:
             self._avg_qty = all_avgs
         for ct, rates in all_rates.items():
             self._drop_rates[ct] = rates
-            self._loading_chests.discard(ct)  # data arrived, hide spinner
+            self._loading_chests.discard(ct)
         self._render_cards()
         for ct in self._chest_types:
             self._update_avg_label(ct)
@@ -849,7 +799,7 @@ class PricesTab:
             return
         stats = self._chest_stats.get(chest_type)
         if stats and stats.avg_revenue_per_chest > 0:
-            text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}" f"  |  {stats.total_chests} chests"
+            text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}  |  {stats.total_chests} chests"
         else:
             rates = self._drop_rates.get(chest_type, {})
             saved = prices_config.load_prices(chest_type)

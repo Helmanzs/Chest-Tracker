@@ -10,6 +10,7 @@ from typing import Callable
 import dearpygui.dearpygui as dpg
 
 _DIALOG_TAG = "setup_dialog_win"
+_SUPABASE_URL = "https://wwgczilevfjyivjmgoia.supabase.co"
 
 
 class SetupDialog:
@@ -22,8 +23,6 @@ class SetupDialog:
     on_cancel  : called if user closes without a valid key
     existing_key : pre-fill the field if a key is already on disk
     """
-
-    SUPABASE_URL = "https://wwgczilevfjyivjmgoia.supabase.co"
 
     def __init__(
         self,
@@ -60,11 +59,7 @@ class SetupDialog:
             pos=[x, y],
         ):
             dpg.add_spacer(height=10)
-            dpg.add_text(
-                "Welcome to Chest Tracker",
-                color=(255, 255, 255, 255),
-            )
-            _make_bold(_DIALOG_TAG)
+            dpg.add_text("Welcome to Chest Tracker", color=(255, 255, 255, 255))
             dpg.add_spacer(height=4)
             dpg.add_text(
                 "Please enter your access key to connect to the database.",
@@ -149,16 +144,18 @@ class SetupDialog:
         if btn_tag:
             dpg.configure_item(btn_tag, enabled=False)
 
-        import threading, db_handler, config as _config
+        import threading
+        import db_handler
+        import config as _config
 
         def _worker():
-            success = db_handler.init(self.SUPABASE_URL, key)
+            success = db_handler.init(_SUPABASE_URL, key)
             if success:
-                _config.save_supabase(self.SUPABASE_URL, key)
+                _config.save_supabase(_SUPABASE_URL, key)
                 dpg.split_frame()
                 if dpg.does_item_exist(_DIALOG_TAG):
                     dpg.delete_item(_DIALOG_TAG)
-                self._on_success(self.SUPABASE_URL, key)
+                self._on_success(_SUPABASE_URL, key)
             else:
                 msg = "Invalid key or connection failed. Please check and try again."
                 if status_tag and dpg.does_item_exist(status_tag):
@@ -172,8 +169,3 @@ class SetupDialog:
         if dpg.does_item_exist(_DIALOG_TAG):
             dpg.delete_item(_DIALOG_TAG)
         self._on_cancel()
-
-
-def _make_bold(parent: str | int) -> None:
-    """DPG doesn't have bold text natively — just a no-op placeholder."""
-    pass

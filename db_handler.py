@@ -8,15 +8,14 @@ Public API
 init(url, key)                          -> bool
 write_chest_loot(chest_type, loot, item_prices) -> ChestWriteResult
 fetch_chests(chest_type)                -> list[ChestRow]
-fetch_loot_for_chest(chest_id)          -> list[LootRow]
 calculate_statistics(chest_type, item_prices) -> Stats
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import threading
-from typing import Any, Optional
+from typing import Any
 
 # supabase-py is a required dependency
 try:
@@ -44,7 +43,7 @@ def init(url: str, key: str) -> bool:
     Returns True on success, False if credentials are missing or
     supabase-py is not installed.
     """
-    global _client
+    global _client, _SUPABASE_URL, _SUPABASE_KEY
     if not _SUPABASE_AVAILABLE:
         print("[db] supabase-py not installed — run: pip install supabase")
         return False
@@ -52,7 +51,6 @@ def init(url: str, key: str) -> bool:
         print("[db] Supabase credentials not configured in tracker_config.txt")
         return False
     try:
-        global _SUPABASE_URL, _SUPABASE_KEY
         assert create_client is not None
         _SUPABASE_URL = url
         _SUPABASE_KEY = key
@@ -232,28 +230,6 @@ def fetch_chests(chest_type: str) -> list[ChestRow]:
         return []
 
 
-def fetch_loot_for_chest(chest_id: int) -> list[LootRow]:
-    """Return all loot rows for a single chest."""
-    if _client is None:
-        return []
-    try:
-        resp = (
-            _client.table("chest_loot").select("id, chest_id, item_name, quantity").eq("chest_id", chest_id).execute()
-        )
-        return [
-            LootRow(
-                id=r["id"],
-                chest_id=r["chest_id"],
-                item_name=r["item_name"],
-                quantity=r["quantity"],
-            )
-            for r in resp.data
-        ]
-    except Exception as exc:
-        print(f"[db] fetch_loot_for_chest error: {exc}")
-        return []
-
-
 def fetch_all_loot(chest_type: str) -> list[dict]:
     """
     Return a flat list of dicts {chest_id, recorded_at, item_name, quantity}
@@ -270,12 +246,13 @@ def fetch_all_loot(chest_type: str) -> list[dict]:
         page_size = 1000
         offset = 0
         while True:
-            resp = (
-                _client.table("chest_loot")
-                .select("chest_id, item_name, quantity, chests!inner(chest_type, recorded_at)")
-                .eq("chests.chest_type", chest_type)
-                .range(offset, offset + page_size - 1)
-                .execute()
+            resp = _execute_with_retry(
+                lambda off=offset: (
+                    _client.table("chest_loot")
+                    .select("chest_id, item_name, quantity, chests!inner(chest_type, recorded_at)")
+                    .eq("chests.chest_type", chest_type)
+                    .range(off, off + page_size - 1)
+                )
             )
             rows = resp.data
             if not rows:
@@ -316,7 +293,9 @@ def calculate_statistics(
         return Stats()
 
     # Get total chest count
-    count_resp = _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).execute()
+    count_resp = _execute_with_retry(
+        lambda: _client.table("chests").select("id", count="exact").eq("chest_type", chest_type)
+    )
     total_chests = count_resp.count or 0
     if total_chests == 0:
         return Stats(total_chests=0)
@@ -327,12 +306,13 @@ def calculate_statistics(
     offset = 0
     while True:
         try:
-            resp = (
-                _client.table("chest_loot")
-                .select("item_name, quantity, chests!inner(chest_type)")
-                .eq("chests.chest_type", chest_type)
-                .range(offset, offset + page_size - 1)
-                .execute()
+            resp = _execute_with_retry(
+                lambda off=offset: (
+                    _client.table("chest_loot")
+                    .select("item_name, quantity, chests!inner(chest_type)")
+                    .eq("chests.chest_type", chest_type)
+                    .range(off, off + page_size - 1)
+                )
             )
         except Exception as exc:
             print(f"[db] calculate_statistics fetch error: {exc}")
@@ -381,12 +361,10 @@ def calculate_streak(chest_type: str, item_name: str) -> dict:
     chest_ids = [c.id for c in chests]
 
     try:
-        resp = (
-            _client.table("chest_loot")
-            .select("chest_id")
-            .in_("chest_id", chest_ids)
-            .eq("item_name", item_name)
-            .execute()
+        resp = _execute_with_retry(
+            lambda: (
+                _client.table("chest_loot").select("chest_id").in_("chest_id", chest_ids).eq("item_name", item_name)
+            )
         )
         chests_with_item = {r["chest_id"] for r in resp.data}
     except Exception as exc:
@@ -396,7 +374,6 @@ def calculate_streak(chest_type: str, item_name: str) -> dict:
     total_chests = len(chests)
     times_dropped = len(chests_with_item)
     longest = 0
-    current = 0
     run = 0
 
     for chest in chests:
@@ -437,7 +414,6 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
     if _client is None:
         return {}
     try:
-        # Get total chest count server-side — no ID list needed
         count_resp = _execute_with_retry(
             lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
         )
@@ -482,9 +458,7 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
 
 
 def fetch_chests_by_ids(chest_ids: list[int]) -> list[dict]:
-    """
-    Return loot rows only for the given chest IDs (used for session view).
-    """
+    """Return loot rows only for the given chest IDs (used for session view)."""
     if _client is None or not chest_ids:
         return []
     try:
@@ -515,7 +489,7 @@ def fetch_chests_by_ids(chest_ids: list[int]) -> list[dict]:
 def calculate_statistics_for_ids(
     chest_ids: list[int],
     item_prices: dict[str, float],
-) -> "Stats":
+) -> Stats:
     """Calculate stats for a specific set of chest IDs (session use)."""
     if _client is None or not chest_ids:
         return Stats()
@@ -541,33 +515,15 @@ def calculate_statistics_for_ids(
 
 
 # ---------------------------------------------------------------------------
-# All-chest startup fetch
-# ---------------------------------------------------------------------------
-
-
-def fetch_all_chest_stats(
-    chest_types: list[str],
-    all_prices: dict[str, dict[str, float]],
-) -> dict[str, "Stats"]:
-    """
-    Return {chest_type: Stats} for every chest type in one pass.
-    Uses !inner join + pagination per chest type.
-    """
-    return {
-        ct: calculate_statistics(ct, {k.lower(): v for k, v in all_prices.get(ct, {}).items()}) for ct in chest_types
-    }
-
-
-# ---------------------------------------------------------------------------
 # Per-item average quantity
 # ---------------------------------------------------------------------------
 
 
 def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
     """
-    Return the average quantity of *item_name* per chest for *chest_type*.
+    Return the average quantity of *item_name* per chest for *chest_type*,
+    counting only chests where the item actually dropped (quantity > 0).
     Returns None if there is no data yet.
-    Only counts chests where the item actually dropped (quantity > 0).
     """
     if _client is None:
         return None
@@ -606,7 +562,7 @@ def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
 def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
     """
     Return {item_name: avg_qty_per_chest} for all items in *chest_type*.
-    avg = total_quantity / total_chests  (includes chests where item did not drop).
+    avg = total_quantity / chests_where_item_dropped (excludes zeros).
     """
     if _client is None:
         return {}
@@ -621,7 +577,7 @@ def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
         from collections import defaultdict
 
         item_totals: dict[str, float] = defaultdict(float)
-        item_counts: dict[str, int] = defaultdict(int)  # chests where item dropped
+        item_counts: dict[str, int] = defaultdict(int)
         page_size = 1000
         offset = 0
         while True:
@@ -644,7 +600,6 @@ def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
                 break
             offset += page_size
 
-        # avg = total_qty / chests_where_it_dropped (not total chests)
         return {name: item_totals[name] / item_counts[name] for name in item_totals if item_counts[name] > 0}
     except Exception as exc:
         print(f"[db] fetch_avg_quantities error: {exc}")

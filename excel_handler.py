@@ -1,77 +1,17 @@
 """
 excel_handler.py
 ----------------
-Slimmed to two responsibilities:
-  1. load_item_prices()  – reads local price sheets (unchanged from before)
-  2. export_to_excel()   – dumps DB data to a .xlsx file on demand
+Exports DB data to a .xlsx file on demand.
 
-No chest writing or statistics live here anymore — that's db_handler.py.
+Note: item price loading is handled by prices_config.py, not here.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 
 import openpyxl
 import pandas as pd
-
-
-# ---------------------------------------------------------------------------
-# Price loading  (unchanged)
-# ---------------------------------------------------------------------------
-
-
-def load_item_prices(excel_path: str, price_sheet: str) -> dict[str, float]:
-    """
-    Read item → price mapping from *price_sheet* in the local Excel file.
-
-    Expected layout: column B = item name, column C = price (row 1 is header).
-    Returns a dict keyed by lowercase stripped item name.
-    """
-    prices: dict[str, float] = {}
-    if not excel_path or not os.path.exists(excel_path):
-        return prices
-
-    try:
-        wb = openpyxl.load_workbook(
-            excel_path,
-            read_only=True,
-            data_only=True,
-            keep_vba=excel_path.endswith(".xlsm"),
-        )
-        if price_sheet not in wb.sheetnames:
-            wb.close()
-            return prices
-
-        ws = wb[price_sheet]
-        for row_idx in range(2, ws.max_row + 1):
-            item_name = ws.cell(row=row_idx, column=2).value
-            price_raw = ws.cell(row=row_idx, column=3).value
-            if not item_name or price_raw is None:
-                continue
-            item_key = str(item_name).strip().lower()
-            try:
-                if isinstance(price_raw, str):
-                    price_val = float(price_raw.replace(" ", "").replace(",", ""))
-                elif isinstance(price_raw, (int, float)):
-                    price_val = float(price_raw)
-                else:
-                    continue
-                prices[item_key] = price_val
-            except (ValueError, TypeError):
-                continue
-
-        wb.close()
-    except Exception as exc:
-        print(f"[excel] load_item_prices error: {exc}")
-
-    return prices
-
-
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
 
 
 def export_to_excel(
@@ -82,7 +22,7 @@ def export_to_excel(
     output_path: str | None = None,
 ) -> str:
     """
-    Export loot data fetched from Supabase to an .xlsx file.
+    Export loot data fetched from Supabase to a .xlsx file.
 
     Parameters
     ----------
@@ -110,7 +50,6 @@ def export_to_excel(
 
     # Reorder columns to match viewer display order
     if column_order:
-        # Keep only columns that exist in pivot, in viewer order, then any remainder
         meta_cols = [c for c in ["chest_id", "recorded_at"] if c in pivot.columns]
         ordered_items = [c for c in column_order if c in pivot.columns and c not in meta_cols]
         remaining = [c for c in pivot.columns if c not in meta_cols and c not in ordered_items]
@@ -126,8 +65,7 @@ def export_to_excel(
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    sheet_name = chest_type[:31]
-    ws.title = sheet_name  # type: ignore[union-attr]
+    ws.title = chest_type[:31]  # type: ignore[union-attr]
 
     # Write loot sheet header + data
     for col_idx, col_name in enumerate(pivot.columns, start=1):
@@ -142,13 +80,11 @@ def export_to_excel(
         ws2.cell(row=1, column=1, value="Item")
         ws2.cell(row=1, column=2, value="Drop Rate %")
 
-        # Sort by drop rate descending, preserving column_order for ties
         def _rate_sort_key(item: str) -> tuple[float, int]:
             rate = drop_rates.get(item, 0.0)
             order_pos = column_order.index(item) if column_order and item in column_order else 9999
             return (-rate, order_pos)
 
-        # Use item columns only (skip meta)
         meta = {"#", "chest_id", "recorded_at"}
         item_cols = [c for c in pivot.columns if c not in meta]
         for row_idx, item in enumerate(sorted(item_cols, key=_rate_sort_key), start=2):
