@@ -161,17 +161,21 @@ def write_chest_loot(
         return ChestWriteResult(success=False, error="NOT_CONNECTED")
 
     try:
-        # 1. Insert the chest record and get its new id
-        chest_resp = _execute_with_retry(lambda: (_client.table("chests").insert({"chest_type": chest_type})))
+        # 1. Insert the chest record with is_valid=True and get its new id
+        chest_resp = _execute_with_retry(
+            lambda: _client.table("chests").insert({"chest_type": chest_type, "is_valid": True})
+        )
         chest_id: int = chest_resp.data[0]["id"]
 
         # 2. Insert all loot rows in one batch
         loot_rows = [{"chest_id": chest_id, "item_name": item.strip(), "quantity": qty} for qty, item in loot]
         _execute_with_retry(lambda: _client.table("chest_loot").insert(loot_rows))
 
-        # 3. Count total chests of this type (for chest number display)
+        # 3. Count total valid chests of this type (for chest number display)
         count_resp = _execute_with_retry(
-            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+            lambda: (
+                _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).eq("is_valid", True)
+            )
         )
         chest_number = count_resp.count or 0
 
@@ -205,7 +209,7 @@ def write_chest_loot(
 
 
 def fetch_chests(chest_type: str) -> list[ChestRow]:
-    """Return all chests of *chest_type* ordered oldest-first."""
+    """Return all valid chests of *chest_type* ordered oldest-first."""
     if _client is None:
         return []
     try:
@@ -214,6 +218,7 @@ def fetch_chests(chest_type: str) -> list[ChestRow]:
                 _client.table("chests")
                 .select("id, chest_type, recorded_at")
                 .eq("chest_type", chest_type)
+                .eq("is_valid", True)
                 .order("recorded_at")
             )
         )
@@ -233,7 +238,7 @@ def fetch_chests(chest_type: str) -> list[ChestRow]:
 def fetch_all_loot(chest_type: str) -> list[dict]:
     """
     Return a flat list of dicts {chest_id, recorded_at, item_name, quantity}
-    for all chests of *chest_type*.
+    for all valid chests of *chest_type*.
 
     Uses !inner join so Supabase filters server-side — avoids the bug where
     a regular join returns all rows with null chest_info for non-matching rows.
@@ -249,8 +254,9 @@ def fetch_all_loot(chest_type: str) -> list[dict]:
             resp = _execute_with_retry(
                 lambda off=offset: (
                     _client.table("chest_loot")
-                    .select("chest_id, item_name, quantity, chests!inner(chest_type, recorded_at)")
+                    .select("chest_id, item_name, quantity, chests!inner(chest_type, recorded_at, is_valid)")
                     .eq("chests.chest_type", chest_type)
+                    .eq("chests.is_valid", True)
                     .range(off, off + page_size - 1)
                 )
             )
@@ -287,20 +293,21 @@ def calculate_statistics(
 ) -> Stats:
     """
     Compute aggregate revenue statistics for *chest_type* using local prices.
+    Only counts valid chests.
     Uses !inner join + pagination — no large ID lists passed over the wire.
     """
     if _client is None:
         return Stats()
 
-    # Get total chest count
+    # Get total valid chest count
     count_resp = _execute_with_retry(
-        lambda: _client.table("chests").select("id", count="exact").eq("chest_type", chest_type)
+        lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type).eq("is_valid", True))
     )
     total_chests = count_resp.count or 0
     if total_chests == 0:
         return Stats(total_chests=0)
 
-    # Fetch all loot via server-side join, paginated
+    # Fetch all loot via server-side join (valid chests only), paginated
     total_revenue = 0.0
     page_size = 1000
     offset = 0
@@ -309,8 +316,9 @@ def calculate_statistics(
             resp = _execute_with_retry(
                 lambda off=offset: (
                     _client.table("chest_loot")
-                    .select("item_name, quantity, chests!inner(chest_type)")
+                    .select("item_name, quantity, chests!inner(chest_type, is_valid)")
                     .eq("chests.chest_type", chest_type)
+                    .eq("chests.is_valid", True)
                     .range(off, off + page_size - 1)
                 )
             )
@@ -339,7 +347,7 @@ def calculate_statistics(
 
 def calculate_streak(chest_type: str, item_name: str) -> dict:
     """
-    Calculate drop streaks for *item_name* across all chests of *chest_type*.
+    Calculate drop streaks for *item_name* across all valid chests of *chest_type*.
 
     Returns
     -------
@@ -354,7 +362,7 @@ def calculate_streak(chest_type: str, item_name: str) -> dict:
     if _client is None:
         return {}
 
-    chests = fetch_chests(chest_type)
+    chests = fetch_chests(chest_type)  # already filters is_valid=True
     if not chests:
         return {}
 
@@ -406,7 +414,7 @@ def calculate_streak(chest_type: str, item_name: str) -> dict:
 def fetch_drop_rates(chest_type: str) -> dict[str, float]:
     """
     Return {item_name: drop_rate_pct} for *chest_type*.
-    drop_rate_pct = chests_where_item_qty_gt_0 / total_chests * 100
+    drop_rate_pct = chests_where_item_qty_gt_0 / total_valid_chests * 100
 
     Uses server-side join + pagination to avoid Supabase URL length limits
     that silently truncate large .in_() ID lists.
@@ -415,7 +423,9 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
         return {}
     try:
         count_resp = _execute_with_retry(
-            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+            lambda: (
+                _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).eq("is_valid", True)
+            )
         )
         total = count_resp.count or 0
         if total == 0:
@@ -431,8 +441,9 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
             resp = _execute_with_retry(
                 lambda off=offset: (
                     _client.table("chest_loot")
-                    .select("chest_id, item_name, quantity, chests!inner(chest_type)")
+                    .select("chest_id, item_name, quantity, chests!inner(chest_type, is_valid)")
                     .eq("chests.chest_type", chest_type)
+                    .eq("chests.is_valid", True)
                     .gt("quantity", 0)
                     .range(off, off + page_size - 1)
                 )
@@ -458,7 +469,9 @@ def fetch_drop_rates(chest_type: str) -> dict[str, float]:
 
 
 def fetch_chests_by_ids(chest_ids: list[int]) -> list[dict]:
-    """Return loot rows only for the given chest IDs (used for session view)."""
+    """Return loot rows only for the given chest IDs (used for session view).
+    These are already known-valid IDs written by this session, so no
+    additional is_valid filter is needed here."""
     if _client is None or not chest_ids:
         return []
     try:
@@ -490,7 +503,8 @@ def calculate_statistics_for_ids(
     chest_ids: list[int],
     item_prices: dict[str, float],
 ) -> Stats:
-    """Calculate stats for a specific set of chest IDs (session use)."""
+    """Calculate stats for a specific set of chest IDs (session use).
+    IDs come from the current session so they are already valid."""
     if _client is None or not chest_ids:
         return Stats()
     try:
@@ -522,14 +536,16 @@ def calculate_statistics_for_ids(
 def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
     """
     Return the average quantity of *item_name* per chest for *chest_type*,
-    counting only chests where the item actually dropped (quantity > 0).
+    counting only valid chests where the item actually dropped (quantity > 0).
     Returns None if there is no data yet.
     """
     if _client is None:
         return None
     try:
         count_resp = _execute_with_retry(
-            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+            lambda: (
+                _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).eq("is_valid", True)
+            )
         )
         total_chests = count_resp.count or 0
         if total_chests == 0:
@@ -538,8 +554,9 @@ def fetch_item_avg(chest_type: str, item_name: str) -> float | None:
         resp = _execute_with_retry(
             lambda: (
                 _client.table("chest_loot")
-                .select("quantity, chests!inner(chest_type)")
+                .select("quantity, chests!inner(chest_type, is_valid)")
                 .eq("chests.chest_type", chest_type)
+                .eq("chests.is_valid", True)
                 .eq("item_name", item_name)
                 .gt("quantity", 0)
             )
@@ -563,12 +580,15 @@ def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
     """
     Return {item_name: avg_qty_per_chest} for all items in *chest_type*.
     avg = total_quantity / chests_where_item_dropped (excludes zeros).
+    Only counts valid chests.
     """
     if _client is None:
         return {}
     try:
         count_resp = _execute_with_retry(
-            lambda: (_client.table("chests").select("id", count="exact").eq("chest_type", chest_type))
+            lambda: (
+                _client.table("chests").select("id", count="exact").eq("chest_type", chest_type).eq("is_valid", True)
+            )
         )
         total = count_resp.count or 0
         if total == 0:
@@ -584,8 +604,9 @@ def fetch_avg_quantities(chest_type: str) -> dict[str, float]:
             resp = _execute_with_retry(
                 lambda off=offset: (
                     _client.table("chest_loot")
-                    .select("item_name, quantity, chests!inner(chest_type)")
+                    .select("item_name, quantity, chests!inner(chest_type, is_valid)")
                     .eq("chests.chest_type", chest_type)
+                    .eq("chests.is_valid", True)
                     .gt("quantity", 0)
                     .range(off, off + page_size - 1)
                 )
