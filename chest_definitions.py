@@ -723,6 +723,7 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
     "World Bounty Chest (Normal)": [
         "Shard",
         "Storm Crystal Shard",
+        "Energy Fragment",
         "Spirit Emblem Chest",
         "Aura Emblem Chest",
         "Magical Smithing Hammer",
@@ -754,6 +755,7 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
     "Dungeon Bounty Chest (Normal)": [
         "Shard",
         "Storm Crystal Shard",
+        "Energy Fragment",
         "Spirit Emblem Chest",
         "Aura Emblem Chest",
         "Magical Smithing Hammer",
@@ -785,6 +787,7 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
     "Portal Bounty Chest (Normal)": [
         "Shard",
         "Storm Crystal Shard",
+        "Energy Fragment",
         "Portal Shard",
         "Spirit Emblem Chest",
         "Aura Emblem Chest",

@@ -225,6 +225,11 @@ class PricesTab:
         self._btn_themes: dict[str, int] = {}
         self._loading_chests: set[str] = set()
 
+        # Per-row widget IDs for in-place updates: (chest_type, item_name) -> {key: tag}
+        self._row_widget_ids: dict[tuple[str, str], dict[str, int | str]] = {}
+        # Per-card widget IDs: chest_type -> {key: tag}
+        self._card_widget_ids: dict[str, dict[str, int | str]] = {}
+
         _ensure_fonts()
         self._build()
         self._load_all()
@@ -289,14 +294,21 @@ class PricesTab:
         self._render_cards()
 
     # ------------------------------------------------------------------
-    # Render
+    # Full rebuild — only called when structure changes (initial load,
+    # search filter change, pin/unpin, chest list change).
     # ------------------------------------------------------------------
 
     def _render_cards(self) -> None:
         area = self._ids.get("card_area")
         if not area or not dpg.does_item_exist(area):
             return
+
+        scroll_x = dpg.get_x_scroll(area)
+
         dpg.delete_item(area, children_only=True)
+        self._row_widget_ids.clear()
+        self._card_widget_ids.clear()
+
         if not self._chest_types:
             return
 
@@ -304,6 +316,55 @@ class PricesTab:
             for ct in self._chest_types:
                 self._build_card(ct)
                 dpg.add_spacer(width=_CARD_GAP)
+
+        _area = area
+        dpg.set_frame_callback(
+            dpg.get_frame_count() + 1,
+            callback=lambda: dpg.set_x_scroll(_area, scroll_x) if dpg.does_item_exist(_area) else None,
+        )
+
+    # ------------------------------------------------------------------
+    # In-place update — called after a data refresh (drop rates, stats).
+    # Only touches text content and spinner visibility; no widget rebuild.
+    # ------------------------------------------------------------------
+
+    def _update_cards_inplace(self) -> None:
+        """Update drop%, avg qty, avg label and spinner without rebuilding cards."""
+        for ct in self._chest_types:
+            self._update_avg_label(ct)
+            self._update_spinner(ct)
+            dr = self._drop_rates.get(ct, {})
+            aq = self._avg_qty.get(ct, {})
+            items = self._vars.get(ct, {})
+            for item_name in items:
+                row_ids = self._row_widget_ids.get((ct, item_name), {})
+
+                chance = dr.get(item_name)
+                if chance is None:
+                    chance_text = ""
+                elif chance == 0.0:
+                    chance_text = "?"
+                else:
+                    chance_text = f"{chance:.1f}%"
+
+                avg = aq.get(item_name)
+                avg_text = f"{avg:.1f}" if avg and avg > 0 else ""
+
+                drop_tag = row_ids.get("drop_text")
+                avg_tag = row_ids.get("avg_text")
+                if drop_tag and dpg.does_item_exist(drop_tag):
+                    dpg.configure_item(drop_tag, default_value=chance_text)
+                if avg_tag and dpg.does_item_exist(avg_tag):
+                    dpg.configure_item(avg_tag, default_value=avg_text)
+
+    def _update_spinner(self, chest_type: str) -> None:
+        """Show or hide the loading spinner for a card without rebuilding it."""
+        spinner_tag = self._card_widget_ids.get(chest_type, {}).get("spinner")
+        if spinner_tag and dpg.does_item_exist(spinner_tag):
+            if chest_type in self._loading_chests:
+                dpg.show_item(spinner_tag)
+            else:
+                dpg.hide_item(spinner_tag)
 
     # ------------------------------------------------------------------
     # Single card
@@ -318,6 +379,8 @@ class PricesTab:
             self._hdr_themes[hdr_key] = _make_hdr_theme(rgb)
         if hdr_key not in self._btn_themes:
             self._btn_themes[hdr_key] = _make_btn_theme(rgb, text_col)
+
+        self._card_widget_ids[chest_type] = {}
 
         with dpg.child_window(width=_CARD_W, height=_CARD_H, border=True, no_scrollbar=True):
             # --- Coloured header band ---
@@ -365,29 +428,32 @@ class PricesTab:
                     )
                     dpg.bind_item_theme(ref_btn, self._btn_themes[hdr_key])
 
-            # --- Avg revenue line (with inline spinner when loading) ---
+            # --- Avg revenue line with always-present (but hidden) spinner ---
             stats = self._chest_stats.get(chest_type)
             if stats and stats.avg_revenue_per_chest > 0:
                 avg_text = f"avg {_fmt_k(stats.avg_revenue_per_chest)}  |  {stats.total_chests} chests"
             else:
                 avg_text = "avg: --"
+
             with dpg.group(horizontal=True):
-                self._ids[f"avg_{chest_type}"] = dpg.add_text(
-                    avg_text,
+                avg_tag = dpg.add_text(avg_text, color=(160, 160, 160, 255), indent=6)
+                self._ids[f"avg_{chest_type}"] = avg_tag
+                self._card_widget_ids[chest_type]["avg_label"] = avg_tag
+
+                dpg.add_spacer(width=8)
+                spinner_tag = dpg.add_loading_indicator(
+                    style=1,
+                    radius=3.5,
+                    speed=2.5,
+                    thickness=2.0,
+                    circle_count=6,
                     color=(160, 160, 160, 255),
-                    indent=6,
+                    secondary_color=(50, 50, 58, 255),
                 )
-                if chest_type in self._loading_chests:
-                    dpg.add_spacer(width=8)
-                    dpg.add_loading_indicator(
-                        style=1,
-                        radius=3.5,
-                        speed=2.5,
-                        thickness=2.0,
-                        circle_count=6,
-                        color=(160, 160, 160, 255),
-                        secondary_color=(50, 50, 58, 255),
-                    )
+                self._card_widget_ids[chest_type]["spinner"] = spinner_tag
+                # Hide spinner unless this chest is currently loading
+                if chest_type not in self._loading_chests:
+                    dpg.hide_item(spinner_tag)
 
             dpg.add_separator()
             self._build_heading_row()
@@ -512,8 +578,11 @@ class PricesTab:
                         user_data=(chest_type, item_name),
                         callback=self._on_pin_click,
                     )
-            dpg.add_text(chance_text, color=_FG_CHANCE)
-            dpg.add_text(avg_text, color=_FG_CHANCE)
+
+            # Named so we can update them in-place later
+            drop_tag = dpg.add_text(chance_text, color=_FG_CHANCE)
+            avg_tag = dpg.add_text(avg_text, color=_FG_CHANCE)
+
             inp_tag = self._tag_for(chest_type, item_name)
             if dpg.does_item_exist(inp_tag):
                 dpg.delete_item(inp_tag)
@@ -535,7 +604,14 @@ class PricesTab:
                     callback=self._on_price_focus_out,
                 )
             dpg.bind_item_handler_registry(inp_tag, _reg)
+
         dpg.highlight_table_row(tbl, 0, row_bg)
+
+        # Store widget IDs for future in-place updates
+        self._row_widget_ids[(chest_type, item_name)] = {
+            "drop_text": drop_tag,
+            "avg_text": avg_tag,
+        }
 
     # ------------------------------------------------------------------
     # Pin / unpin
@@ -743,7 +819,8 @@ class PricesTab:
     def _refresh_single_chest(self, chest_type: str) -> None:
         _, short = _chest_display(chest_type)
         self._loading_chests.add(chest_type)
-        self._render_cards()
+        # Show spinner in-place — no full rebuild needed
+        self._update_spinner(chest_type)
         sync = self._ids.get("sync_label")
         if sync and dpg.does_item_exist(sync):
             dpg.configure_item(sync, default_value=f"Refreshing {short}...")
@@ -760,8 +837,8 @@ class PricesTab:
         self._chest_stats[chest_type] = stats
         self._loading_chests.discard(chest_type)
         dpg.split_frame()
-        self._render_cards()
-        self._update_avg_label(chest_type)
+        # Update only the changed data in-place — no flicker
+        self._update_cards_inplace()
         _, short = _chest_display(chest_type)
         sync = self._ids.get("sync_label")
         if sync and dpg.does_item_exist(sync):
@@ -780,9 +857,8 @@ class PricesTab:
         for ct, rates in all_rates.items():
             self._drop_rates[ct] = rates
             self._loading_chests.discard(ct)
-        self._render_cards()
-        for ct in self._chest_types:
-            self._update_avg_label(ct)
+        # Update in-place — cards are already built
+        self._update_cards_inplace()
         sync = self._ids.get("sync_label")
         if sync and dpg.does_item_exist(sync):
             dpg.configure_item(sync, default_value="Drop rates loaded")
@@ -791,7 +867,10 @@ class PricesTab:
         """Mark chest types as loading (shows spinner). Called from app startup."""
         for ct in chest_types:
             self._loading_chests.add(ct)
-        self._render_cards()
+        # Cards may not be built yet on first startup; _build_card handles initial state.
+        # For subsequent calls (e.g. manual refresh), update spinners in-place.
+        for ct in chest_types:
+            self._update_spinner(ct)
 
     def _update_avg_label(self, chest_type: str) -> None:
         tag = self._ids.get(f"avg_{chest_type}")

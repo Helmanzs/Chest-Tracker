@@ -30,7 +30,7 @@ from ui.prices_tab import PricesTab
 from ui.viewer_tab import ViewerTab
 import updater
 
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 
 
 @dataclass
