@@ -32,7 +32,7 @@ from ui.prices_tab import PricesTab
 from ui.viewer_tab import ViewerTab
 import updater
 
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.18"
 
 # Target ~30 fps during idle (milliseconds per frame).
 # DPG's render loop is CPU-bound; sleeping each frame drops idle CPU from
