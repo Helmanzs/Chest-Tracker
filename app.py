@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import dearpygui.dearpygui as dpg
 
+import chest_definitions
 import config
 import prices_config
 import db_handler
@@ -32,7 +33,7 @@ from ui.prices_tab import PricesTab
 from ui.viewer_tab import ViewerTab
 import updater
 
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 
 # Target ~30 fps during idle (milliseconds per frame).
 # DPG's render loop is CPU-bound; sleeping each frame drops idle CPU from
@@ -283,6 +284,9 @@ class App:
     # ------------------------------------------------------------------
 
     def _startup(self) -> None:
+        import chest_definitions
+
+        _queue(lambda: self._log(f"Chest definitions: {chest_definitions.DEFINITIONS_STATUS}", "gray"))
         threading.Thread(target=self._check_for_update, daemon=True).start()
         if config.has_supabase_config():
             _queue(self._connect_db_and_load)

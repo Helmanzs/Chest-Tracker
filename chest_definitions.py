@@ -1078,3 +1078,16 @@ DEFAULT_ITEMS: dict[str, list[str]] = {
         "Settler Contract: Legendary",
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Remote override: pull the latest definitions from Supabase on every launch.
+# Falls back to a local cache, then to the bundled values above.
+# ---------------------------------------------------------------------------
+import remote_definitions as _remote
+
+_data, DEFINITIONS_STATUS = _remote.fetch_definitions()
+if _data is not None:
+    CHEST_DEFINITIONS = [(c["name"], c["display"], c["color"]) for c in _data["chest_definitions"]]
+    DEFAULT_ITEMS = {k: list(v) for k, v in _data["default_items"].items()}
+    PATTERN_CHEST_DEFINITIONS = [(p["name"], list(p["required"])) for p in _data.get("pattern_chests", [])]
+    BOUNTY_TIER_GROUPS = {k: list(v) for k, v in _data.get("bounty_tier_groups", {}).items()}

@@ -182,3 +182,4 @@ cython_debug/
 
 tracker_config.txt
 prices_config.txt
+chest_definitions_cache.json
