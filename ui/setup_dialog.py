@@ -1,27 +1,27 @@
-"""
-ui/setup_dialog.py  (Dear PyGui port)
-----------------------------------------
-Modal dialog shown on first launch to gather the Supabase access key.
-"""
+"""Modal dialog shown on first launch (or failed connection) to collect the Supabase access key."""
 
 from __future__ import annotations
 
+import threading
 from typing import Callable
+
 import dearpygui.dearpygui as dpg
 
+import config
+import db_handler
+from ui.dialogs import centered_pos
+from ui.theme import GREEN, color_button
+
 _DIALOG_TAG = "setup_dialog_win"
-_SUPABASE_URL = "https://wwgczilevfjyivjmgoia.supabase.co"
+_WIDTH = 480
+_ERROR = (255, 80, 80, 255)
 
 
 class SetupDialog:
     """
-    Modal dialog asking for the Supabase access key.
-
-    Parameters
-    ----------
-    on_success : called with (url, key) when validated
-    on_cancel  : called if user closes without a valid key
-    existing_key : pre-fill the field if a key is already on disk
+    on_success(url, key) : called once the key has been validated and saved
+    on_cancel()          : called if the user closes the dialog without connecting
+    existing_key         : pre-fills the key field
     """
 
     def __init__(
@@ -36,18 +36,9 @@ class SetupDialog:
         self._ids: dict[str, int | str] = {}
         self._build()
 
-    # ------------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------------
-
     def _build(self) -> None:
         if dpg.does_item_exist(_DIALOG_TAG):
             dpg.delete_item(_DIALOG_TAG)
-
-        vw = dpg.get_viewport_width()
-        vh = dpg.get_viewport_height()
-        x = max(0, (vw - 480) // 2)
-        y = max(0, (vh - 300) // 2)
 
         with dpg.window(
             tag=_DIALOG_TAG,
@@ -55,8 +46,8 @@ class SetupDialog:
             modal=True,
             no_resize=True,
             no_close=True,
-            width=480,
-            pos=[x, y],
+            width=_WIDTH,
+            pos=centered_pos(_WIDTH, 300),
         ):
             dpg.add_spacer(height=10)
             dpg.add_text("Welcome to Chest Tracker", color=(255, 255, 255, 255))
@@ -76,44 +67,25 @@ class SetupDialog:
                     label="",
                     hint="Paste your Supabase key here",
                     password=True,
-                    callback=lambda s, a: None,
                 )
 
             dpg.add_spacer(height=4)
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=100)
-                self._ids["show_cb"] = dpg.add_checkbox(
-                    label="Show key",
-                    default_value=False,
-                    callback=self._toggle_show,
-                )
+                dpg.add_checkbox(label="Show key", default_value=False, callback=self._toggle_show)
 
             dpg.add_spacer(height=8)
-            self._ids["status"] = dpg.add_text("", color=(255, 80, 80, 255), wrap=460, indent=8)
+            self._ids["status"] = dpg.add_text("", color=_ERROR, wrap=460, indent=8)
             dpg.add_spacer(height=8)
 
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=100)
                 self._ids["connect_btn"] = dpg.add_button(
-                    label="Connect",
-                    width=100,
-                    height=32,
-                    callback=self._try_connect,
+                    label="Connect", width=100, height=32, callback=self._try_connect
                 )
-                with dpg.theme() as green_theme:
-                    with dpg.theme_component(dpg.mvButton):
-                        dpg.add_theme_color(dpg.mvThemeCol_Button, (46, 204, 113, 220))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (46, 204, 113, 255))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (27, 152, 79, 255))
-                dpg.bind_item_theme(self._ids["connect_btn"], green_theme)
-
+                color_button(self._ids["connect_btn"], GREEN)
                 dpg.add_spacer(width=8)
-                dpg.add_button(
-                    label="Cancel",
-                    width=80,
-                    height=32,
-                    callback=self._cancel,
-                )
+                dpg.add_button(label="Cancel", width=80, height=32, callback=self._cancel)
 
             dpg.add_spacer(height=10)
 
@@ -122,48 +94,37 @@ class SetupDialog:
     # ------------------------------------------------------------------
 
     def _toggle_show(self, sender, app_data) -> None:
-        key = self._ids.get("key_input")
-        if key and dpg.does_item_exist(key):
-            dpg.configure_item(key, password=not app_data)
+        dpg.configure_item(self._ids["key_input"], password=not app_data)
+
+    def _set_status(self, text: str, colour: tuple[int, int, int, int] = _ERROR) -> None:
+        tag = self._ids["status"]
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, default_value=text, color=colour)
 
     def _try_connect(self) -> None:
-        key_tag = self._ids.get("key_input")
-        status_tag = self._ids.get("status")
-        btn_tag = self._ids.get("connect_btn")
-
-        if not key_tag:
-            return
-        key = dpg.get_value(key_tag).strip()
+        key = dpg.get_value(self._ids["key_input"]).strip()
         if not key:
-            if status_tag:
-                dpg.configure_item(status_tag, default_value="Please enter an access key.")
+            self._set_status("Please enter an access key.")
             return
 
-        if status_tag:
-            dpg.configure_item(status_tag, default_value="Connecting…", color=(200, 200, 80, 255))
-        if btn_tag:
-            dpg.configure_item(btn_tag, enabled=False)
+        self._set_status("Connecting…", (200, 200, 80, 255))
+        dpg.configure_item(self._ids["connect_btn"], enabled=False)
+        threading.Thread(target=self._connect_worker, args=(key,), daemon=True).start()
 
-        import threading
-        import db_handler
-        import config as _config
+    def _connect_worker(self, key: str) -> None:
+        url = config.DEFAULT_SUPABASE_URL
+        if db_handler.init(url, key):
+            config.save_supabase(url, key)
+            dpg.split_frame()
+            if dpg.does_item_exist(_DIALOG_TAG):
+                dpg.delete_item(_DIALOG_TAG)
+            self._on_success(url, key)
+            return
 
-        def _worker():
-            success = db_handler.init(_SUPABASE_URL, key)
-            if success:
-                _config.save_supabase(_SUPABASE_URL, key)
-                dpg.split_frame()
-                if dpg.does_item_exist(_DIALOG_TAG):
-                    dpg.delete_item(_DIALOG_TAG)
-                self._on_success(_SUPABASE_URL, key)
-            else:
-                msg = "Invalid key or connection failed. Please check and try again."
-                if status_tag and dpg.does_item_exist(status_tag):
-                    dpg.configure_item(status_tag, default_value=msg, color=(255, 80, 80, 255))
-                if btn_tag and dpg.does_item_exist(btn_tag):
-                    dpg.configure_item(btn_tag, enabled=True)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        self._set_status("Invalid key or connection failed. Please check and try again.")
+        button = self._ids["connect_btn"]
+        if dpg.does_item_exist(button):
+            dpg.configure_item(button, enabled=True)
 
     def _cancel(self) -> None:
         if dpg.does_item_exist(_DIALOG_TAG):

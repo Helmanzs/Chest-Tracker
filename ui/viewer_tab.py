@@ -1,29 +1,26 @@
-"""
-ui/viewer_tab.py  (Dear PyGui port)
--------------------------------------
-The "Excel Data" tab: chest selector, session toggle, export,
-statistics panel, and a scrollable data table.
-"""
+"""The "Excel Data" tab: chest selector, session toggle, export, statistics and a data table."""
 
 from __future__ import annotations
 
 from typing import Callable
+
 import dearpygui.dearpygui as dpg
 import pandas as pd
 
 import db_handler
+from ui.theme import GREEN, color_button
+from utils import fmt_number
 
-# Columns always shown first, regardless of price, in the order listed here.
+# Columns always shown first, in this order.
 PINNED_COLUMNS = ["#", "chest_id", "recorded_at", "Shard", "Energy Fragment"]
 
-# Table row alternating colours (RGBA)
 _ROW_EVEN = (50, 50, 55, 255)
 _ROW_ODD = (42, 42, 48, 255)
+_TABLE_TAG = "viewer_data_table"
+_EMPTY_MSG_TAG = "_viewer_empty_msg"
 
 
 class ViewerTab:
-    """Manages all widgets inside the Excel Data tab."""
-
     def __init__(
         self,
         parent_tag: str | int,
@@ -43,10 +40,10 @@ class ViewerTab:
         self._on_session_toggle = on_session_toggle
         self._on_chest_selected = on_chest_selected
 
-        default = initial_chest if initial_chest in chest_types else (chest_types[0] if chest_types else "")
-        self._selected_chest = default
+        self._selected_chest = (
+            initial_chest if initial_chest in chest_types else (chest_types[0] if chest_types else "")
+        )
         self._session_mode = False
-
         self._ids: dict[str, int | str] = {}
 
         self._build()
@@ -57,7 +54,6 @@ class ViewerTab:
 
     def _build(self) -> None:
         with dpg.group(parent=self._parent):
-            # -- Top row ---------------------------------------------
             with dpg.group(horizontal=True):
                 dpg.add_text("Chest:", indent=4)
                 self._ids["chest_combo"] = dpg.add_combo(
@@ -68,7 +64,7 @@ class ViewerTab:
                     callback=self._on_combo,
                 )
                 dpg.add_spacer(width=16)
-                self._ids["session_cb"] = dpg.add_checkbox(
+                dpg.add_checkbox(
                     label="Show current session only",
                     default_value=False,
                     callback=self._on_checkbox,
@@ -76,54 +72,43 @@ class ViewerTab:
 
             dpg.add_spacer(height=4)
 
-            # -- Button row ------------------------------------------
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Refresh Data", callback=self._on_refresh)
                 dpg.add_spacer(width=4)
                 dpg.add_button(label="Reload Prices", callback=self._on_reload_prices)
                 dpg.add_spacer(width=4)
-                btn_export = dpg.add_button(
-                    label="Export to Excel",
-                    callback=self._on_export,
-                )
-                with dpg.theme() as exp_theme:
-                    with dpg.theme_component(dpg.mvButton):
-                        dpg.add_theme_color(dpg.mvThemeCol_Button, (39, 174, 96, 220))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (39, 174, 96, 255))
-                        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (27, 130, 70, 255))
-                dpg.bind_item_theme(btn_export, exp_theme)
+                export_btn = dpg.add_button(label="Export to Excel", callback=self._on_export)
+                color_button(export_btn, GREEN)
 
             dpg.add_spacer(height=6)
             dpg.add_separator()
             dpg.add_spacer(height=4)
 
-            # -- Statistics ------------------------------------------
-            with dpg.collapsing_header(label="Statistics", default_open=True):
-                with dpg.table(header_row=False, borders_innerV=False, borders_outerV=False):
-                    dpg.add_table_column(width_fixed=True, init_width_or_weight=150)
-                    dpg.add_table_column(width_fixed=True, init_width_or_weight=180)
-                    dpg.add_table_column(width_fixed=True, init_width_or_weight=150)
-                    dpg.add_table_column(width_fixed=True, init_width_or_weight=220)
-
-                    with dpg.table_row():
-                        dpg.add_text("Chests:")
-                        self._ids["total_chests"] = dpg.add_text("0", color=(100, 140, 255, 255))
-                        dpg.add_text("Revenue/Chest:")
-                        self._ids["rev_per_chest"] = dpg.add_text("N/A", color=(80, 200, 100, 255))
-
-                    with dpg.table_row():
-                        dpg.add_text("Total Revenue:")
-                        self._ids["total_rev"] = dpg.add_text("N/A", color=(80, 200, 100, 255))
+            self._build_statistics()
 
             dpg.add_spacer(height=6)
-
-            # -- Data table (scrollable child window) ----------------
             self._ids["table_container"] = dpg.add_child_window(
                 width=-1,
                 height=-1,
                 horizontal_scrollbar=True,
                 border=True,
             )
+
+    def _build_statistics(self) -> None:
+        with dpg.collapsing_header(label="Statistics", default_open=True):
+            with dpg.table(header_row=False, borders_innerV=False, borders_outerV=False):
+                for width in (150, 180, 150, 220):
+                    dpg.add_table_column(width_fixed=True, init_width_or_weight=width)
+
+                with dpg.table_row():
+                    dpg.add_text("Chests:")
+                    self._ids["total_chests"] = dpg.add_text("0", color=(100, 140, 255, 255))
+                    dpg.add_text("Revenue/Chest:")
+                    self._ids["rev_per_chest"] = dpg.add_text("N/A", color=(80, 200, 100, 255))
+
+                with dpg.table_row():
+                    dpg.add_text("Total Revenue:")
+                    self._ids["total_rev"] = dpg.add_text("N/A", color=(80, 200, 100, 255))
 
     # ------------------------------------------------------------------
     # Public interface
@@ -132,47 +117,46 @@ class ViewerTab:
     def selected_chest(self) -> str:
         return self._selected_chest
 
+    def is_session_mode(self) -> bool:
+        return self._session_mode
+
     def set_selected_chest(self, chest_type: str) -> None:
-        if chest_type in self._chest_types:
-            self._selected_chest = chest_type
-            if dpg.does_item_exist(self._ids["chest_combo"]):
-                dpg.set_value(self._ids["chest_combo"], chest_type)
+        if chest_type not in self._chest_types:
+            return
+        self._selected_chest = chest_type
+        if dpg.does_item_exist(self._ids["chest_combo"]):
+            dpg.set_value(self._ids["chest_combo"], chest_type)
 
     def set_chest_types(self, chest_types: list[str]) -> None:
         self._chest_types = chest_types
-        if dpg.does_item_exist(self._ids["chest_combo"]):
-            dpg.configure_item(self._ids["chest_combo"], items=chest_types)
-            if chest_types and not self._selected_chest:
-                self._selected_chest = chest_types[0]
-                dpg.set_value(self._ids["chest_combo"], chest_types[0])
+        combo = self._ids["chest_combo"]
+        if not dpg.does_item_exist(combo):
+            return
+        dpg.configure_item(combo, items=chest_types)
+        if chest_types and not self._selected_chest:
+            self._selected_chest = chest_types[0]
+            dpg.set_value(combo, chest_types[0])
 
-    def load_dataframe(
-        self,
-        df: pd.DataFrame,
-        item_prices: dict[str, float] | None = None,
-    ) -> None:
+    def load_dataframe(self, df: pd.DataFrame, item_prices: dict[str, float] | None = None) -> None:
         container = self._ids.get("table_container")
         if not container or not dpg.does_item_exist(container):
             return
 
-        # Clear existing table
-        if dpg.does_item_exist("viewer_data_table"):
-            dpg.delete_item("viewer_data_table")
+        for tag in (_TABLE_TAG, _EMPTY_MSG_TAG):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
 
         if df.empty:
-            with dpg.group(parent=container, tag="_viewer_empty_msg"):
+            with dpg.group(parent=container, tag=_EMPTY_MSG_TAG):
                 dpg.add_spacer(height=10)
                 dpg.add_text("No data yet -- start tracking chests!", color=(160, 160, 160, 255))
             return
 
-        if dpg.does_item_exist("_viewer_empty_msg"):
-            dpg.delete_item("_viewer_empty_msg")
-
-        cols = self._sort_columns(list(df.columns), item_prices or {})
-        df = df[cols]
+        columns = self._sort_columns(list(df.columns), item_prices or {})
+        df = df[columns]
 
         with dpg.table(
-            tag="viewer_data_table",
+            tag=_TABLE_TAG,
             parent=container,
             header_row=True,
             row_background=True,
@@ -186,55 +170,40 @@ class ViewerTab:
             policy=dpg.mvTable_SizingFixedFit,
             height=-1,
         ):
-            for col in cols:
-                w = max(len(str(col)) * 9, 80)
-                dpg.add_table_column(
-                    label=col,
-                    init_width_or_weight=min(w, 160),
-                )
+            for col in columns:
+                dpg.add_table_column(label=col, init_width_or_weight=min(max(len(str(col)) * 9, 80), 160))
 
-            for i, (_, row) in enumerate(df.iterrows()):
+            for i, row in enumerate(df.itertuples(index=False)):
                 with dpg.table_row():
-                    for val in row:
-                        dpg.add_text(str(val) if val != 0 else "")
-                colour = _ROW_EVEN if i % 2 == 0 else _ROW_ODD
-                dpg.highlight_table_row("viewer_data_table", i, colour)
+                    for value in row:
+                        dpg.add_text(str(value) if value != 0 else "")
+                dpg.highlight_table_row(_TABLE_TAG, i, _ROW_EVEN if i % 2 == 0 else _ROW_ODD)
 
-    def show_stats(
-        self,
-        session_stats: db_handler.Stats,
-        total_stats: db_handler.Stats | None = None,
-    ) -> None:
+    def show_stats(self, session_stats: db_handler.Stats, total_stats: db_handler.Stats | None = None) -> None:
+        """Show session stats, with all-time totals in parentheses when they differ."""
         s, t = session_stats, total_stats
 
         if s.total_chests == 0:
-            chests_text = "0" + (f" ({t.total_chests})" if t else "")
-            self._set_text("total_chests", chests_text)
+            self._set_text("total_chests", "0" + (f" ({t.total_chests})" if t else ""))
             if t and t.total_chests > 0:
-                self._set_text("rev_per_chest", f"N/A ({self._fmt(t.avg_revenue_per_chest)})")
-                self._set_text("total_rev", f"N/A ({self._fmt(t.total_revenue)})")
+                self._set_text("rev_per_chest", f"N/A ({fmt_number(t.avg_revenue_per_chest)})")
+                self._set_text("total_rev", f"N/A ({fmt_number(t.total_revenue)})")
             else:
                 self._set_text("rev_per_chest", "N/A")
                 self._set_text("total_rev", "N/A")
             return
 
-        chests_text = str(s.total_chests)
+        chests = str(s.total_chests)
+        avg = fmt_number(s.avg_revenue_per_chest)
+        revenue = fmt_number(s.total_revenue)
         if t and t.total_chests != s.total_chests:
-            chests_text += f" ({t.total_chests})"
-        self._set_text("total_chests", chests_text)
+            chests += f" ({t.total_chests})"
+            avg += f" ({fmt_number(t.avg_revenue_per_chest)})"
+            revenue += f" ({fmt_number(t.total_revenue)})"
 
-        avg_text = self._fmt(s.avg_revenue_per_chest)
-        if t and t.total_chests != s.total_chests:
-            avg_text += f" ({self._fmt(t.avg_revenue_per_chest)})"
-        self._set_text("rev_per_chest", avg_text)
-
-        total_text = self._fmt(s.total_revenue)
-        if t and t.total_chests != s.total_chests:
-            total_text += f" ({self._fmt(t.total_revenue)})"
-        self._set_text("total_rev", total_text)
-
-    def is_session_mode(self) -> bool:
-        return self._session_mode
+        self._set_text("total_chests", chests)
+        self._set_text("rev_per_chest", avg)
+        self._set_text("total_rev", revenue)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -254,16 +223,8 @@ class ViewerTab:
             dpg.configure_item(tag, default_value=text)
 
     @staticmethod
-    def _sort_columns(cols: list[str], item_prices: dict[str, float]) -> list[str]:
-        """
-        Returns columns with PINNED_COLUMNS first (in pinned order),
-        then remaining columns sorted by descending item price.
-        """
-        pinned = [c for c in PINNED_COLUMNS if c in cols]
-        unpinned = [c for c in cols if c not in pinned]
-        unpinned.sort(key=lambda c: -item_prices.get(c.lower(), 0.0))
-        return pinned + unpinned
-
-    @staticmethod
-    def _fmt(value: float) -> str:
-        return f"{int(value):,}".replace(",", " ")
+    def _sort_columns(columns: list[str], item_prices: dict[str, float]) -> list[str]:
+        """Pinned columns first, then the rest by descending item price."""
+        pinned = [c for c in PINNED_COLUMNS if c in columns]
+        rest = sorted((c for c in columns if c not in pinned), key=lambda c: -item_prices.get(c.lower(), 0.0))
+        return pinned + rest

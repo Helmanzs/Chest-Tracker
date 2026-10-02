@@ -1,90 +1,52 @@
 """
-config.py
----------
-Thin key-value config persisted to tracker_config.txt.
-Only stores user settings (log path, supabase credentials, mini position, etc.)
+Key-value user settings persisted to tracker_config.txt
+(log path, supabase credentials, ...).
 
-Chest definitions have moved to chest_definitions.py (static, app-bundled).
-Item prices are managed by prices_config.py.
-
-Format of tracker_config.txt
------------------------------
-log_path=C:/path/to/game.log
-supabase_url=https://xxxx.supabase.co
-supabase_key=your_key_here
-mini_x=500
-mini_y=900
-
-No UI or business-logic imports – safe to import from anywhere.
+Chest definitions live in chest_definitions.py; prices in prices_config.py.
 """
 
 from pathlib import Path
 
 CONFIG_FILE = Path("tracker_config.txt")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Low-level key-value helpers
-# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_SUPABASE_URL = "https://wwgczilevfjyivjmgoia.supabase.co"
 
 
-def load(key: str, default: str = "") -> str:
-    """Return the stored value for *key*, or *default* if absent."""
+def _read_all() -> dict[str, str]:
+    values: dict[str, str] = {}
     if not CONFIG_FILE.exists():
-        return default
+        return values
     try:
         with CONFIG_FILE.open("r", encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if "=" in stripped:
-                    k, _, v = stripped.partition("=")
-                    if k.strip() == key:
-                        return v.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    key, _, value = stripped.partition("=")
+                    values[key.strip()] = value.strip()
     except OSError as exc:
         print(f"[config] read error: {exc}")
-    return default
+    return values
+
+
+def load(key: str, default: str = "") -> str:
+    return _read_all().get(key, default)
 
 
 def save(values: dict[str, str]) -> None:
-    """Persist *values*, merging with any keys already on disk."""
-    existing: dict[str, str] = {}
-
-    if CONFIG_FILE.exists():
-        try:
-            with CONFIG_FILE.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-                    if "=" in stripped:
-                        k, _, v = stripped.partition("=")
-                        existing[k.strip()] = v.strip()
-        except OSError as exc:
-            print(f"[config] read error before save: {exc}")
-
-    existing.update(values)
-
+    """Persist *values*, merging with the keys already on disk."""
+    merged = {**_read_all(), **values}
     try:
         with CONFIG_FILE.open("w", encoding="utf-8") as fh:
-            for k, v in existing.items():
-                fh.write(f"{k}={v}\n")
+            for key, value in merged.items():
+                fh.write(f"{key}={value}\n")
     except OSError as exc:
         print(f"[config] write error: {exc}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Supabase key validation helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 def has_supabase_config() -> bool:
-    """Return True if both supabase_url and supabase_key are set."""
     url = load("supabase_url")
     key = load("supabase_key")
     return bool(url and key and "YOUR_" not in url and "YOUR_" not in key)
 
 
 def save_supabase(url: str, key: str) -> None:
-    """Save Supabase credentials to tracker_config.txt."""
     save({"supabase_url": url, "supabase_key": key})
