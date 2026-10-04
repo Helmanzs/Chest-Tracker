@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import db_cache
@@ -53,6 +53,16 @@ class Stats:
     total_chests: int = 0
     total_revenue: float = 0.0
     avg_revenue_per_chest: float = 0.0
+    # lower-case item name -> total quantity over all chests (enables local re-pricing)
+    item_totals: dict[str, float] = field(default_factory=dict)
+
+    def repriced(self, item_prices: dict[str, float]) -> "Stats":
+        """Same chests valued at *item_prices* (lower-case keys). No DB access."""
+        if not self.item_totals:
+            return self
+        revenue = sum(qty * item_prices.get(name, 0.0) for name, qty in self.item_totals.items())
+        avg = revenue / self.total_chests if self.total_chests else 0.0
+        return Stats(self.total_chests, revenue, avg, self.item_totals)
 
 
 @dataclass
@@ -266,7 +276,7 @@ def calculate_statistics(chest_type: str, item_prices: dict[str, float]) -> Stat
         else:
             rows = _paginate(lambda: _loot_query(chest_type, "item_name, quantity"))
             revenue = _revenue(rows, item_prices)
-            result = Stats(total_chests, revenue, revenue / total_chests)
+            result = Stats(total_chests, revenue, revenue / total_chests, _item_totals(rows))
         db_cache.set_statistics(chest_type, result)
         return result
     except Exception as exc:
@@ -329,6 +339,13 @@ def _revenue(rows: list[dict], item_prices: dict[str, float]) -> float:
     return sum(
         r["quantity"] * item_prices[key] for r in rows if (key := r["item_name"].strip().lower()) in item_prices
     )
+
+
+def _item_totals(rows: list[dict]) -> dict[str, float]:
+    totals: dict[str, float] = defaultdict(float)
+    for r in rows:
+        totals[r["item_name"].strip().lower()] += r["quantity"]
+    return dict(totals)
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +438,10 @@ def fetch_all_stats_batch(
 
         stats = db_cache.get_statistics(ct)
         if stats is None:
-            stats = Stats(total, revenue[ct], revenue[ct] / total if total else 0.0)
+            totals: dict[str, float] = defaultdict(float)
+            for item, qty in qty_totals[ct].items():
+                totals[item.strip().lower()] += qty
+            stats = Stats(total, revenue[ct], revenue[ct] / total if total else 0.0, dict(totals))
             db_cache.set_statistics(ct, stats)
         all_stats[ct] = stats
 

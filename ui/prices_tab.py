@@ -21,6 +21,7 @@ from typing import Callable
 
 import dearpygui.dearpygui as dpg
 
+import db_cache
 import db_handler
 import prices_config
 from chest_definitions import DEFAULT_ITEMS
@@ -289,7 +290,8 @@ class PricesTab:
         all_avgs: dict[str, dict[str, float]] | None = None,
     ) -> None:
         if all_stats:
-            self._chest_stats = all_stats
+            # Stats come from the DB valued at *saved* prices; show them at the displayed prices.
+            self._chest_stats = {ct: s.repriced(self._current_prices(ct)) for ct, s in all_stats.items()}
         if all_avgs:
             self._avg_qty = all_avgs
         for ct, rates in all_rates.items():
@@ -303,6 +305,22 @@ class PricesTab:
         self._loading_chests.update(chest_types)
         for ct in chest_types:
             self._update_spinner(ct)
+
+    # ------------------------------------------------------------------
+    # Displayed prices & per-chest value
+    # ------------------------------------------------------------------
+
+    def _current_prices(self, chest_type: str) -> dict[str, float]:
+        """Lower-case item -> price, from what is currently shown (saved or not)."""
+        return {name.lower(): _safe_parse(text) for name, text in self._vars.get(chest_type, {}).items()}
+
+    def _reprice_chests(self, chest_types: list[str]) -> None:
+        """Recompute the per-chest value of *chest_types* from the displayed prices."""
+        for ct in chest_types:
+            stats = self._chest_stats.get(ct)
+            if stats is not None:
+                self._chest_stats[ct] = stats.repriced(self._current_prices(ct))
+            self._update_avg_label(ct)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -367,7 +385,7 @@ class PricesTab:
             text = self._avg_summary(stats)
         else:
             rates = self._drop_rates.get(chest_type, {})
-            prices = lower_keys(prices_config.load_prices(chest_type))
+            prices = self._current_prices(chest_type)
             expected = sum(rates.get(n, 0.0) / 100.0 * prices.get(n.lower(), 0.0) for n in rates)
             text = f"est. avg {fmt_number(expected)}" if expected > 0 else "avg: --"
         dpg.configure_item(tag, default_value=text)
@@ -636,7 +654,7 @@ class PricesTab:
             dpg.bind_item_theme(tag, self._highlight_themes[active])
 
     def _commit(self, chest_type: str, item_name: str, input_tag: int | str) -> None:
-        """Normalise the typed price and push it to the same item in other chests."""
+        """Normalise the typed price, push it to the same item in other chests, and reprice them."""
         try:
             price = parse_price(dpg.get_value(input_tag))
         except (ValueError, OverflowError):
@@ -647,12 +665,16 @@ class PricesTab:
         self._vars[chest_type][item_name] = formatted
 
         synced_to: list[str] = []
+        affected = [chest_type]
         for other_ct, other_name in self._siblings(chest_type, item_name):
             self._vars[other_ct][other_name] = formatted
             tag = _input_tag(other_ct, other_name)
             if dpg.does_item_exist(tag):
                 dpg.set_value(tag, formatted)
             synced_to.append(_chest_display(other_ct)[1])
+            affected.append(other_ct)
+
+        self._reprice_chests(affected)
 
         if synced_to:
             self._set_sync_message(f"'{item_name}' synced to: {', '.join(synced_to)}")
@@ -711,14 +733,20 @@ class PricesTab:
         self._loading_chests.add(chest_type)
         self._update_spinner(chest_type)
         self._set_sync_message(f"Refreshing {_chest_display(chest_type)[1]}...")
-        threading.Thread(target=self._fetch_single_worker, args=(chest_type,), daemon=True).start()
+        prices = self._current_prices(chest_type)  # snapshot on the UI thread
+        threading.Thread(target=self._fetch_single_worker, args=(chest_type, prices), daemon=True).start()
 
-    def _fetch_single_worker(self, chest_type: str) -> None:
-        self._drop_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
-        self._avg_qty[chest_type] = db_handler.fetch_avg_quantities(chest_type)
-        prices = lower_keys(prices_config.load_prices(chest_type))
-        self._chest_stats[chest_type] = db_handler.calculate_statistics(chest_type, prices)
-        self._loading_chests.discard(chest_type)
+    def _fetch_single_worker(self, chest_type: str, ui_prices: dict[str, float]) -> None:
+        try:
+            db_cache.invalidate(chest_type)  # a manual refresh must hit the DB
+            self._drop_rates[chest_type] = db_handler.fetch_drop_rates(chest_type)
+            self._avg_qty[chest_type] = db_handler.fetch_avg_quantities(chest_type)
+
+            saved = lower_keys(prices_config.load_prices(chest_type))
+            stats = db_handler.calculate_statistics(chest_type, saved)  # cached with saved prices
+            self._chest_stats[chest_type] = stats.repriced(ui_prices)  # shown with displayed prices
+        finally:
+            self._loading_chests.discard(chest_type)
 
         dpg.split_frame()
         self._update_cards_inplace()

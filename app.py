@@ -33,7 +33,7 @@ from ui.tracker_tab import TrackerTab
 from ui.viewer_tab import ViewerTab
 from utils import fmt_number, lower_keys
 
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 
 _FRAME_SLEEP_S = 0.033  # ~30 fps
 
